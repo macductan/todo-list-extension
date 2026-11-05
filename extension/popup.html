@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GitTask Sync</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="extension-viewport" id="extensionViewport">
+    <!-- 1. EXTENSION HEADER -->
+    <header class="ext-header">
+      <div class="ext-title-group">
+        <div class="ext-logo" aria-hidden="true">GT</div>
+        <div>
+          <div class="ext-name">GitTask Sync</div>
+          <div class="ext-meta-sub">
+            <span class="tree-status-pill clean" id="treeStatusBadge" title="Trạng thái cây dữ liệu cục bộ so với GitHub">✓ Cây sạch</span>
+            <span class="ext-sha-pill" id="headerShaBadge" title="Mã base_sha của lần đồng bộ gần nhất">SHA: chưa đồng bộ</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="ext-header-actions">
+        <button type="button" class="icon-btn accent-outline" id="btnQuickGoAdd" title="Thêm công việc mới">
+          ➕ Tạo Task
+        </button>
+        <button type="button" class="icon-btn sync-pull" id="btnPullGitHub" title="Pull (Tải file JSON mới nhất từ GitHub)">
+          ⬇ Pull GitHub
+        </button>
+        <button type="button" class="icon-btn sync-push" id="btnPushGitHub" title="Push (Đẩy danh sách task lên GitHub kèm base_sha)">
+          ⬆ Push GitHub
+        </button>
+        <button type="button" class="icon-btn" id="btnToggleTheme" title="Đổi giao diện Sáng / Tối">
+          🌗
+        </button>
+        <button type="button" class="icon-btn" id="btnOpenFloatingWindow" title="Mở dưới dạng Cửa sổ nổi độc lập (Floating Popup Window)">
+          🪟 Cửa sổ nổi
+        </button>
+        <button type="button" class="icon-btn" id="btnOpenFullTab" title="Mở toàn màn hình trong Tab trình duyệt mới">
+          🗖 Mở Tab
+        </button>
+      </div>
+    </header>
+
+    <!-- 2. NAVIGATION TABS -->
+    <nav class="ext-nav-tabs" aria-label="Điều hướng chính">
+      <button type="button" class="ext-tab active" id="tabBtnTasks">
+        <span>📋 Công việc (<span id="navTaskCount">0</span>)</span>
+      </button>
+      <button type="button" class="ext-tab" id="tabBtnAddTask">
+        <span>➕ Thêm / Sửa Task</span>
+      </button>
+      <button type="button" class="ext-tab" id="tabBtnGroups">
+        <span>🗂️ Quản lý Nhóm (<span id="navGroupCount">0</span>)</span>
+      </button>
+      <button type="button" class="ext-tab" id="tabBtnSettings">
+        <span>⚙️ GitHub &amp; Bảo mật</span>
+      </button>
+    </nav>
+
+    <!-- 3. TOAST NOTIFICATION -->
+    <div class="status-banner" id="statusBanner" role="status" aria-live="polite">
+      <span id="statusBannerText"></span>
+      <div class="banner-right-actions">
+        <button type="button" class="banner-link-btn hidden" id="btnBannerAction"></button>
+        <button type="button" class="banner-close-btn" id="btnCloseBanner" title="Đóng thông báo">✕</button>
+      </div>
+      <div class="toast-progress-bar" id="toastProgressBar" aria-hidden="true"></div>
+    </div>
+
+    <!-- 4. CONFLICT RESOLUTION ALERT BOX -->
+    <div class="conflict-box" id="conflictAlertBox" role="alert">
+      <div class="conflict-header-row">
+        <div class="conflict-title">
+          ⚠️ Phát hiện Xung đột Dữ liệu (GitHub Conflict)
+        </div>
+        <button type="button" class="banner-close-btn" id="btnDismissConflict" title="Ẩn hộp cảnh báo">✕</button>
+      </div>
+      <div class="conflict-desc" id="conflictDescText">
+        Dữ liệu trên GitHub đã bị sửa đổi từ nơi khác (mã SHA từ xa khác với base_sha cục bộ). Hệ thống đã dừng ghi đè để bảo vệ dữ liệu của bạn.
+      </div>
+      <div class="conflict-sha-compare">
+        <div>Local base_sha: <strong id="conflictLocalSha">-</strong></div>
+        <div>Remote SHA: <strong id="conflictRemoteSha">-</strong></div>
+      </div>
+      <div class="conflict-links">
+        <a id="conflictFileLink" class="conflict-link" href="https://github.com" target="_blank" rel="noopener noreferrer">
+          🔗 Mở file trên GitHub Web
+        </a>
+        <a id="conflictCommitsLink" class="conflict-link" href="https://github.com" target="_blank" rel="noopener noreferrer">
+          🕒 Xem lịch sử Commit
+        </a>
+      </div>
+      <div class="conflict-actions">
+        <button type="button" class="btn-xs btn-force-pull" id="btnForcePull">
+          ⬇ Force Pull (Lấy bản GitHub)
+        </button>
+        <button type="button" class="btn-xs btn-force-push" id="btnForcePush">
+          ⬆ Force Push (Ghi đè lên GitHub)
+        </button>
+      </div>
+    </div>
+
+    <!-- 5. SCROLLABLE BODY -->
+    <main class="ext-body">
+      <!-- ==================== VIEW 1: TASK LIST ==================== -->
+      <section class="ext-view active" id="viewTasks" aria-label="Danh sách công việc">
+        <div class="toolbar-row">
+          <div class="search-input-wrap">
+            <input
+              type="search"
+              id="searchTaskInput"
+              class="ext-input"
+              placeholder="🔍 Tìm kiếm công việc theo tên, mô tả hoặc nhóm..."
+            />
+          </div>
+
+          <div class="status-segment" role="group" aria-label="Lọc theo trạng thái">
+            <button type="button" class="status-seg-btn active" data-statusfilter="todo" id="segBtnTodo">
+              ⏳ Chưa làm (<span id="countTodoBadge">0</span>)
+            </button>
+            <button type="button" class="status-seg-btn" data-statusfilter="all" id="segBtnAll">
+              📋 Tất cả (<span id="countAllBadge">0</span>)
+            </button>
+            <button type="button" class="status-seg-btn" data-statusfilter="done" id="segBtnDone">
+              ✅ Đã xong (<span id="countDoneBadge">0</span>)
+            </button>
+          </div>
+
+          <select id="statusFilterSelect" class="ext-select hidden-control" title="Lọc theo trạng thái">
+            <option value="todo" selected>Chưa làm</option>
+            <option value="all">Tất cả</option>
+            <option value="done">Đã xong</option>
+          </select>
+        </div>
+
+        <div class="grouping-bar-row">
+          <div class="grouping-toggles">
+            <button
+              type="button"
+              class="icon-btn accent-outline"
+              id="btnToggleGroupBy"
+              title="Ẩn/hiển thị chia nhóm công việc theo Nhóm (Group)"
+            >
+              🗂 Nhóm Group: BẬT
+            </button>
+            <button
+              type="button"
+              class="icon-btn accent-outline"
+              id="btnTogglePriorityGroup"
+              title="Ẩn/hiển thị chia nhóm công việc theo mức độ ưu tiên (Priority) bên trong mỗi Nhóm"
+            >
+              🚩 Nhóm Priority: BẬT
+            </button>
+          </div>
+          <div class="filter-pills" id="priorityFilterBar" aria-label="Lọc theo cờ ưu tiên"></div>
+        </div>
+
+        <div class="filter-bar-row">
+          <div class="filter-pills" id="groupFilterBar" aria-label="Lọc theo nhóm công việc"></div>
+          <button
+            type="button"
+            class="icon-btn"
+            id="btnQuickManageGroups"
+            title="Mở quản lý Thêm / Sửa / Xóa Nhóm công việc"
+          >
+            ✏️ Quản lý nhóm
+          </button>
+        </div>
+
+        <div class="task-list" id="taskListContainer"></div>
+      </section>
+
+      <!-- ==================== VIEW 2: ADD / EDIT TASK ==================== -->
+      <section class="ext-view" id="viewAddTask" aria-label="Thêm hoặc sửa công việc">
+        <form class="task-form-card" id="taskForm" autocomplete="off">
+          <div class="form-header-row">
+            <span class="section-heading" id="formModeTitle">➕ Thêm công việc mới</span>
+            <button type="button" class="text-link-btn" id="btnToggleDescInput">
+              📝 Ẩn/Hiện vùng mô tả
+            </button>
+          </div>
+
+          <input type="hidden" id="taskEditId" value="" />
+
+          <div>
+            <label class="field-label" for="taskTitleInput">
+              <span>Tên công việc *</span>
+            </label>
+            <input
+              type="text"
+              id="taskTitleInput"
+              class="ext-input"
+              placeholder="Nhập tên công việc cần thực hiện..."
+              required
+            />
+          </div>
+
+          <div class="form-row-2col">
+            <div>
+              <label class="field-label" for="taskGroupSelect">
+                <span>Nhóm công việc (Group)</span>
+              </label>
+              <div class="inline-flex-gap">
+                <select id="taskGroupSelect" class="ext-select" title="Chọn nhóm công việc"></select>
+                <button type="button" class="icon-btn" id="btnNewGroupPrompt" title="Tạo nhóm mới">+ Nhóm</button>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label" for="taskPrioritySelect">
+                <span>Cờ ưu tiên (Priority)</span>
+              </label>
+              <select id="taskPrioritySelect" class="ext-select" title="Chọn cờ ưu tiên">
+                <option value="none" selected>⚪ Không ưu tiên (Mặc định)</option>
+                <option value="low">🟢 Low (Thấp)</option>
+                <option value="medium">🟡 Medium (Trung bình)</option>
+                <option value="high">🔴 High (Cao)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="new-group-row" id="newGroupRow">
+            <input
+              type="text"
+              id="newGroupInput"
+              class="ext-input"
+              placeholder="Nhập tên nhóm mới (VD: Sprint 12, Backend, UI/UX)..."
+            />
+            <button type="button" class="btn-primary" id="btnSaveNewGroup">Lưu nhóm</button>
+          </div>
+
+          <div class="desc-input-container" id="descInputContainer">
+            <label class="field-label" for="taskDescInput">
+              <span>Mô tả chi tiết (Description)</span>
+            </label>
+            <textarea
+              id="taskDescInput"
+              class="ext-textarea"
+              rows="4"
+              placeholder="Nhập mô tả chi tiết công việc, ghi chú kỹ thuật hoặc các bước thực hiện..."
+            ></textarea>
+          </div>
+
+          <div>
+            <div class="field-label">
+              <span>🖼️ Hình ảnh đính kèm (Tùy chọn: chọn file, kéo thả hoặc Ctrl+V)</span>
+              <span class="label-hint" id="imageCountLabel">0 ảnh đính kèm</span>
+            </div>
+
+            <div class="image-upload-zone" id="imageDropZone">
+              <input
+                type="file"
+                id="taskImageInput"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                multiple
+                class="hidden-control"
+              />
+              <div class="upload-zone-title">
+                📤 Nhấn để chọn ảnh hoặc Kéo thả / Dán (Ctrl+V) ảnh chụp màn hình
+              </div>
+              <div class="upload-zone-sub">
+                Ảnh được nén nhẹ tự động để lưu vào chrome.storage.local &amp; đồng bộ GitHub JSON
+              </div>
+            </div>
+
+            <div class="image-preview-list" id="formImagePreviewList"></div>
+          </div>
+
+          <div class="form-actions-end">
+            <button type="button" class="btn-secondary" id="btnCancelEdit">
+              ← Quay lại Danh sách
+            </button>
+            <button type="submit" class="btn-primary" id="btnSubmitTask">
+              ➕ Lưu Công Việc
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- ==================== VIEW 3: GROUP CRUD MANAGEMENT ==================== -->
+      <section class="ext-view" id="viewGroups" aria-label="Quản lý Nhóm công việc">
+        <div class="settings-group">
+          <div class="form-header-row">
+            <span class="section-heading">🗂️ Quản lý Nhóm công việc (CRUD)</span>
+            <span class="label-hint">Thứ tự nhóm tại đây cũng là thứ tự hiển thị ngoài danh sách</span>
+          </div>
+
+          <form class="group-crud-add-row" id="groupCrudAddForm" autocomplete="off">
+            <input
+              type="text"
+              id="crudNewGroupInput"
+              class="ext-input"
+              placeholder="Nhập tên nhóm mới (VD: Backend, Frontend, Sprint 15, Cá nhân)..."
+            />
+            <button type="submit" class="btn-primary" id="btnCrudAddGroup">
+              ➕ Thêm nhóm
+            </button>
+          </form>
+
+          <div class="group-crud-list" id="groupCrudList"></div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 4: GITHUB SETTINGS & SECURITY ==================== -->
+      <section class="ext-view" id="viewSettings" aria-label="Cấu hình GitHub và Bảo mật">
+        <form class="settings-group" id="githubConfigForm" autocomplete="off">
+          <div class="section-heading">
+            🔗 Cấu hình Đồng bộ GitHub (Contents API)
+          </div>
+
+          <div>
+            <label class="field-label" for="ghQuickPathInput">
+              <span>Đường dẫn nhanh (owner/repo/branch/path hoặc URL file GitHub)</span>
+              <span class="label-hint">Tự động tách trường</span>
+            </label>
+            <input
+              type="text"
+              id="ghQuickPathInput"
+              class="ext-input"
+              placeholder="VD: username/my-repo/main/tasks.json hoặc https://github.com/..."
+            />
+          </div>
+
+          <div class="form-row-2col">
+            <div>
+              <label class="field-label" for="ghOwnerInput">
+                <span>Owner / Tổ chức *</span>
+              </label>
+              <input
+                type="text"
+                id="ghOwnerInput"
+                class="ext-input"
+                placeholder="VD: octocat"
+                required
+              />
+            </div>
+            <div>
+              <label class="field-label" for="ghRepoInput">
+                <span>Repository *</span>
+              </label>
+              <input
+                type="text"
+                id="ghRepoInput"
+                class="ext-input"
+                placeholder="VD: my-todo-data"
+                required
+              />
+            </div>
+          </div>
+
+          <div class="form-row-2col">
+            <div>
+              <label class="field-label" for="ghBranchInput">
+                <span>Nhánh (Branch) *</span>
+              </label>
+              <input
+                type="text"
+                id="ghBranchInput"
+                class="ext-input"
+                placeholder="VD: main"
+                required
+              />
+            </div>
+            <div>
+              <label class="field-label" for="ghFilePathInput">
+                <span>Đường dẫn file JSON *</span>
+              </label>
+              <input
+                type="text"
+                id="ghFilePathInput"
+                class="ext-input"
+                placeholder="VD: tasks.json"
+                required
+              />
+            </div>
+          </div>
+
+          <div>
+            <label class="field-label" for="ghTokenInput">
+              <span>Personal Access Token (Fine-grained PAT) *</span>
+              <span class="label-security-note">🔒 Lưu cục bộ • Không bao giờ ghi log</span>
+            </label>
+            <input
+              type="password"
+              id="ghTokenInput"
+              class="ext-input"
+              placeholder="Nhập Fine-grained Personal Access Token..."
+              autocomplete="new-password"
+              spellcheck="false"
+              required
+            />
+          </div>
+
+          <div class="form-actions-end">
+            <button type="button" class="btn-secondary" id="btnClearGitHubConfig">
+              🗑️ Xóa cấu hình
+            </button>
+            <button type="submit" class="btn-primary" id="btnSaveGitHubConfig">
+              💾 Lưu cấu hình vào chrome.storage.local
+            </button>
+          </div>
+        </form>
+
+        <form class="settings-group" id="autoPushAndWindowForm" autocomplete="off">
+          <div class="form-header-row">
+            <span class="section-heading">⚡ Cấu hình Auto Push &amp; Cửa sổ nổi</span>
+            <label class="toggle-check-label" for="autoPushEnabledInput">
+              <input type="checkbox" id="autoPushEnabledInput" checked />
+              <span>Bật Auto Push tự động</span>
+            </label>
+          </div>
+
+          <div class="form-row-2col">
+            <div>
+              <label class="field-label" for="autoPushDebounceValue">
+                <span>Delay sau thay đổi cuối cùng (Debounce)</span>
+                <span class="label-hint">Mặc định: 10s</span>
+              </label>
+              <div class="inline-flex-gap">
+                <input
+                  type="number"
+                  id="autoPushDebounceValue"
+                  class="ext-input"
+                  min="1"
+                  max="86400"
+                  step="1"
+                  value="10"
+                  required
+                />
+                <select id="autoPushDebounceUnit" class="ext-select unit-select" title="Đơn vị thời gian sau thay đổi cuối">
+                  <option value="s" selected>giây (s)</option>
+                  <option value="m">phút (p)</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label" for="autoPushMaxWaitValue">
+                <span>Delay tối đa từ thay đổi đầu tiên</span>
+                <span class="label-hint">Mặc định: 5p</span>
+              </label>
+              <div class="inline-flex-gap">
+                <input
+                  type="number"
+                  id="autoPushMaxWaitValue"
+                  class="ext-input"
+                  min="1"
+                  max="86400"
+                  step="1"
+                  value="5"
+                  required
+                />
+                <select id="autoPushMaxWaitUnit" class="ext-select unit-select" title="Đơn vị thời gian tính từ thay đổi đầu tiên">
+                  <option value="s">giây (s)</option>
+                  <option value="m" selected>phút (p)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-note-text">
+            💡 Mỗi khi bạn thêm/sửa/xóa task, bộ đếm sau thay đổi cuối cùng sẽ đặt lại; nếu bạn thao tác liên tục không nghỉ thì tối đa đúng hạn kể từ thay đổi đầu tiên hệ thống vẫn tự động commit &amp; Push lên GitHub.
+          </div>
+
+          <div>
+            <label class="field-label" for="launchModeSelect">
+              <span>Chế độ mở khi bấm biểu tượng Extension trên thanh Chrome</span>
+            </label>
+            <select id="launchModeSelect" class="ext-select">
+              <option value="popup" selected>📌 Popup gắn dưới thanh công cụ (780×600 — Mặc định)</option>
+              <option value="window">🪟 Cửa sổ nổi dạng Popup (Floating Window — Kéo thả &amp; co giãn tự do)</option>
+            </select>
+          </div>
+
+          <div class="form-actions-end">
+            <button type="submit" class="btn-primary" id="btnSavePreferences">
+              💾 Lưu cấu hình Auto Push &amp; Cửa sổ
+            </button>
+          </div>
+        </form>
+
+        <div class="security-guide-box">
+          <div class="security-guide-title">
+            🛡️ Hướng dẫn tạo Fine-grained Personal Access Token an toàn
+          </div>
+          <ol class="security-steps">
+            <li>Mở <strong>GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens</strong>.</li>
+            <li>Nhấn <strong>Generate new token</strong>, đặt tên gợi nhớ và chọn thời hạn hiệu lực phù hợp.</li>
+            <li>Tại mục <strong>Repository access</strong>: Chọn <em>"Only select repositories"</em> và chỉ chọn <strong>đúng 1 repository riêng biệt</strong> dùng để lưu dữ liệu công việc.</li>
+            <li>Tại mục <strong>Permissions → Repository permissions</strong>: Chỉ cấp quyền <strong>Contents: Read and write</strong> (giữ tất cả quyền khác ở mức <em>No access</em>).</li>
+            <li>Sao chép mã Token vừa tạo và dán vào ô mật khẩu phía trên. Tuyệt đối không dùng Classic Token cấp toàn quyền <code>repo</code>.</li>
+          </ol>
+        </div>
+      </section>
+    </main>
+
+    <!-- IMAGE LIGHTBOX -->
+    <div class="lightbox-backdrop" id="imageLightbox" role="dialog" aria-modal="true" aria-label="Xem ảnh đính kèm">
+      <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Ảnh đính kèm phóng to" class="lightbox-img" id="lightboxImgEl" />
+      <div class="lightbox-footer">
+        <span class="lightbox-caption" id="lightboxCaption"></span>
+        <button type="button" class="btn-primary" id="btnCopyLightboxImage">📋 Copy ảnh</button>
+        <button type="button" class="btn-secondary" id="btnCloseLightbox">✕ Đóng ảnh</button>
+      </div>
+    </div>
+
+    <!-- 6. FOOTER -->
+    <footer class="ext-footer">
+      <span id="footerStorageStatus">💾 chrome.storage.local: Sẵn sàng</span>
+      <span id="footerLastSync">Chưa đồng bộ</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

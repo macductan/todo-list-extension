@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+tests/node_modules/
+
+# Test artifacts and reports
+test-results/
+tests/test-results/
+playwright-report/
+blob-report/
+
+# Environment and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
