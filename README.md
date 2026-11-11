@@ -2,11 +2,11 @@
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/macductan/todo-list-extension)
 [![Manifest](https://img.shields.io/badge/Manifest-V3-success.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
-[![Playwright Tests](https://img.shields.io/badge/playwright-9%2F9%20passed-brightgreen.svg)](tests/)
+[![Playwright Tests](https://img.shields.io/badge/playwright-10%2F10%20passed-brightgreen.svg)](tests/)
 [![Vanilla JS](https://img.shields.io/badge/built%20with-100%25%20Vanilla%20JS-F7DF1E.svg)](extension/)
 [![License](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
 
-Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được xây dựng bằng **100% Vanilla HTML, CSS, JavaScript (ES6+)** — hoàn toàn không dùng framework, không thư viện UI ngoài, không cần bundler (Webpack/Vite) — và đồng bộ dữ liệu hai chiều trực tiếp qua **GitHub REST API (Contents API & Git Blobs API)**.
+Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được xây dựng bằng **100% Vanilla HTML, CSS, JavaScript (ES6+)** — hoàn toàn không dùng framework, không thư viện UI ngoài, không cần bundler (Webpack/Vite) — và đồng bộ dữ liệu hai chiều theo **cây thư mục thực tế** trực tiếp qua **GitHub REST API (Git Trees API, Contents API & Git Blobs API)**.
 
 ---
 
@@ -28,13 +28,15 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
 - **Lọc nhiều cờ cùng lúc**: Cho phép chọn đồng thời nhiều cờ (ví dụ High + Medium); nút `Tất cả cờ` hỗ trợ bật/tắt toàn bộ nhanh chóng.
 - Huy hiệu số đếm (`badge count`) tự động đồng bộ theo bộ lọc trạng thái (`Đang làm` / `Đã xong`).
 
-### 3. 🗂️ Phân cấp `Nhóm -> Priority` & Quản lý Nhóm độc lập
-- Danh sách công việc phân cấp 2 tầng rõ ràng: **Nhóm công việc (`Group`)** ➔ **Cờ ưu tiên (`Priority`)**.
-- Cho phép thu gọn/mở rộng từng nhóm hoặc lọc hiển thị nhóm trên thanh công cụ.
+### 3. 🗂️ Cây Thư Mục Đa Cấp (`Cha / Con / Cháu`) & Phân cấp `Nhóm -> Priority`
+- Hỗ trợ tổ chức công việc theo **cây thư mục nhiều tầng** (ví dụ: `Công việc` ➔ `Công việc/Dự án A` ➔ `Công việc/Dự án A/Sprint 1`).
+- Danh sách công việc hiển thị trực quan cấu trúc thư mục lồng nhau (`nested group section`) kết hợp phân tầng **Cờ ưu tiên (`Priority`)**.
+- Khi lọc theo thư mục cha trên thanh công cụ, hệ thống tự động hiển thị toàn bộ công việc thuộc thư mục cha và các thư mục con/cháu bên trong.
 - Tab `🗂️ Quản lý Nhóm` chuyên biệt:
-  - Thêm mới, đổi tên nhóm (tự động cập nhật toàn bộ task thuộc nhóm).
-  - Sắp xếp thứ tự hiển thị bằng nút `↑` / `↓`.
-  - Xóa nhóm an toàn: bắt buộc chọn chuyển việc sang nhóm khác trước khi xóa, tránh mất dữ liệu.
+  - Tạo thư mục gốc hoặc thư mục con thông qua ô chọn **Thư mục cha**, nhập đường dẫn phân cách bởi `/`, hoặc bấm nút `➕ Nhóm con` ngay trên từng dòng thư mục.
+  - Đổi tên thư mục cha tự động cập nhật dây chuyền (`cascade`) sang toàn bộ thư mục con/cháu và các công việc bên trong.
+  - Sắp xếp thứ tự hiển thị anh em cùng cấp bằng nút `↑` / `↓`.
+  - Xóa nhánh thư mục an toàn: bắt buộc chọn chuyển công việc sang thư mục khác trước khi xóa, và mọi thao tác thêm/sửa/xóa/sắp xếp thư mục đều đánh dấu trạng thái **Chưa sạch (`Dirty`)** để đồng bộ lên Git.
 
 ### 4. 🪟 Popup tiện dụng & Cửa sổ nổi độc lập (Floating Window)
 - **Popup mặc định**: Nhấn icon trên thanh công cụ mở giao diện kích thước chuẩn `780×600`.
@@ -50,8 +52,10 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
   - **Max Delay**: Giới hạn tối đa tính từ thay đổi đầu tiên (mặc định `5 phút`), đảm bảo thay đổi liên tục vẫn được đẩy lên GitHub định kỳ.
   - Tự động tạm dừng nếu phát hiện xung đột từ xa.
 
-### 6. 🐙 Đồng bộ GitHub REST API & Chống ghi đè xung đột (Conflict Resolution)
-- Đồng bộ hóa qua `https://api.github.com/repos/{owner}/{repo}/contents/{path}`.
+### 6. 🐙 Đồng bộ Cây Thư Mục qua GitHub Git Trees API & Chống ghi đè xung đột
+- **Tổ chức cây thư mục thật trên GitHub Repository**:
+  - Mỗi nhóm/thư mục được đồng bộ thành một đường dẫn thư mục riêng chứa file `tasks.json` (ví dụ: `<baseDir>/Công việc/tasks.json`, `<baseDir>/Công việc/Dự án A/Sprint 1/tasks.json`) thông qua **Git Trees API** (`/git/refs/heads/{branch}`, `/git/trees`, `/git/commits`, `/git/blobs`), kèm theo file manifest lưu thứ tự cây thư mục (bao gồm cả thư mục rỗng) và tự động xóa các thư mục cũ (`sha: null`) khi đổi tên hoặc xóa nhóm.
+  - Tự động tương thích ngược (fallback) về `/contents/{path}` khi cần thiết.
 - Lưu trữ `base_sha` của commit gần nhất tại `chrome.storage.local`.
 - Tự động kiểm tra xung đột trước khi đẩy:
   - Nếu `sha` trên GitHub khác `base_sha` hoặc API trả về mã `409 Conflict` / `422 Unprocessable`: lập tức cảnh báo đỏ, không ghi đè dữ liệu.
@@ -141,7 +145,7 @@ npm install
 npm test
 ```
 
-### Các kịch bản kiểm thử bao phủ (9 test suites):
+### Các kịch bản kiểm thử bao phủ (10 test suites):
 1. **CRUD & Local Storage**: Tạo, Đọc, Sửa, Xóa task, đóng/mở mô tả chi tiết, lưu trữ `chrome.storage.local`.
 2. **Sort & Search**: Đánh dấu Hoàn thành, tự động sắp xếp task xong xuống dưới, tìm kiếm từ khóa, chuyển đổi Dark/Light mode.
 3. **GitHub Sync & Conflict**: Xử lý path chứa ký tự đặc biệt, Pull/Push, bảo vệ Dirty Local, phát hiện xung đột HTTP 409 & hiển thị link GitHub.
@@ -151,6 +155,7 @@ npm test
 7. **Cửa sổ nổi & Auto Push**: Mở Floating Window (`chrome.windows.create`), đếm ngược Auto Push 2 bộ đếm (Idle timer & Max timer), trạng thái Cây sạch/Chưa sạch.
 8. **Bộ lọc Multi-select Priority**: Chọn đồng thời nhiều cờ ưu tiên, nút Tất cả cờ, kiểm tra biến động số đếm khi thay đổi trạng thái hoàn thành.
 9. **Copy nhanh (Text + Ảnh) & Toast tự ẩn**: Sao chép đồng thời văn bản mô tả và nhiều hình ảnh đính kèm qua `ClipboardItem` (chống XSS khi paste), copy ảnh lẻ từ Lightbox, và thông báo Toast nổi tự động ẩn (kèm tạm dừng khi hover).
+10. **Cây thư mục đa cấp & Git Trees API**: Tạo thư mục con/cháu nhiều tầng, lọc công việc theo nhánh thư mục, đổi tên thư mục cha cập nhật dây chuyền xuống thư mục con, đánh dấu Dirty khi thao tác thư mục và đồng bộ từng thư mục thành `<folder>/tasks.json` qua Git Trees API.
 
 ---
 

@@ -1400,4 +1400,279 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     assertCleanConsole();
   });
+
+  test("10. Cây thư mục đa cấp (Subfolders) & Đồng bộ Git Trees API (<folder>/tasks.json cho từng thư mục)", async () => {
+    const { page, assertCleanConsole } = await openExtensionPopupPage();
+
+    // 1. Mở tab Quản lý Nhóm -> Tạo thư mục con qua dropdown Nhóm cha & nút ➕ Nhóm con trực tiếp
+    await page.click("#tabBtnGroups");
+    await expect(page.locator("#viewGroups")).toHaveClass(/active/);
+
+    // Chọn nhóm cha "Công việc" từ dropdown #crudParentGroupSelect rồi tạo "Dự án A"
+    await page.selectOption("#crudParentGroupSelect", "Công việc");
+    await page.fill("#crudNewGroupInput", "Dự án A");
+    await page.click("#btnCrudAddGroup");
+
+    const subGroupRow = page.locator('.group-crud-item[data-group-item="Công việc/Dự án A"]');
+    await expect(subGroupRow).toBeVisible();
+    await expect(subGroupRow).toHaveClass(/is-subfolder/);
+
+    // Ngay cả khi chưa có task nào, thao tác thêm thư mục phải đánh dấu Working Tree là "Chưa sạch" (dirty)
+    await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
+
+    // Dùng nút "➕ Nhóm con" ngay trên dòng "Công việc/Dự án A" để tạo thư mục cháu "Sprint 1"
+    await subGroupRow.locator(".btn-add-subfolder").click();
+    const inlineSubInput = subGroupRow.locator(".group-subfolder-input");
+    await expect(inlineSubInput).toBeVisible();
+    await inlineSubInput.fill("Sprint 1");
+    await subGroupRow.locator(".btn-save-subfolder").click();
+
+    const grandChildRow = page.locator(
+      '.group-crud-item[data-group-item="Công việc/Dự án A/Sprint 1"]'
+    );
+    await expect(grandChildRow).toBeVisible();
+
+    // Tạo thêm 1 thư mục gốc rỗng "Lưu trữ"
+    await page.selectOption("#crudParentGroupSelect", "");
+    await page.fill("#crudNewGroupInput", "Lưu trữ");
+    await page.click("#btnCrudAddGroup");
+    await expect(page.locator('.group-crud-item[data-group-item="Lưu trữ"]')).toBeVisible();
+
+    // 2. Tạo công việc ở thư mục gốc "Công việc" và thư mục cháu "Công việc/Dự án A/Sprint 1"
+    await page.click("#tabBtnAddTask");
+    await page.fill("#taskTitleInput", "Họp định kỳ đầu tuần");
+    await page.selectOption("#taskGroupSelect", "Công việc");
+    await page.click("#btnSubmitTask");
+
+    await page.click("#tabBtnAddTask");
+    await page.fill("#taskTitleInput", "Thiết kế kiến trúc Git Tree");
+    await page.selectOption("#taskGroupSelect", "Công việc/Dự án A/Sprint 1");
+    await page.click("#btnSubmitTask");
+
+    // Kiểm tra giao diện cây thư mục lồng nhau trong tab Danh sách và bộ lọc theo cây
+    const rootSection = page.locator('.group-section[data-group-name="Công việc"]');
+    const nestedSection = rootSection.locator(
+      '.group-section-nested[data-group-name="Công việc/Dự án A/Sprint 1"]'
+    );
+    await expect(rootSection).toBeVisible();
+    await expect(nestedSection).toBeVisible();
+    await expect(nestedSection).toContainText("Thiết kế kiến trúc Git Tree");
+
+    // Khi lọc theo nhóm cha "Công việc", phải hiển thị cả công việc của nhóm con/cháu
+    await page.click('#groupFilterBar .filter-pill[data-group="Công việc"]');
+    await expect(page.locator(".task-card")).toHaveCount(2);
+
+    // Khi lọc riêng nhóm cháu "Công việc/Dự án A/Sprint 1", chỉ hiển thị 1 công việc
+    await page.click('#groupFilterBar .filter-pill[data-group="Công việc/Dự án A/Sprint 1"]');
+    await expect(page.locator(".task-card")).toHaveCount(1);
+    await expect(page.locator(".task-card").first()).toContainText("Thiết kế kiến trúc Git Tree");
+    await page.click('#groupFilterBar .filter-pill[data-group="ALL"]');
+
+    // 3. Mock GitHub Git Trees API để kiểm tra Push/Pull từng thư mục thành <folder>/tasks.json
+    let headCommitSha = "commit_initial_001";
+    let headTreeSha = "tree_initial_001";
+    const blobStore = new Map();
+    let currentTreeEntries = []; // [{ path, mode, type, sha }]
+    const pushedTreePayloads = [];
+
+    await context.route("https://api.github.com/**", async (route) => {
+      const req = route.request();
+      const method = req.method();
+      const url = new URL(req.url());
+      const pathname = decodeURIComponent(url.pathname);
+
+      // GET /repos/:owner/:repo/git/refs/heads/:branch
+      if (method === "GET" && pathname.includes("/git/refs/heads/")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ref: "refs/heads/main",
+            object: { sha: headCommitSha, type: "commit" }
+          })
+        });
+        return;
+      }
+
+      // GET /repos/:owner/:repo/git/commits/:sha
+      if (method === "GET" && pathname.includes("/git/commits/")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            sha: headCommitSha,
+            tree: { sha: headTreeSha }
+          })
+        });
+        return;
+      }
+
+      // GET /repos/:owner/:repo/git/trees/:sha
+      if (method === "GET" && pathname.includes("/git/trees/")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            sha: headTreeSha,
+            truncated: false,
+            tree: currentTreeEntries
+          })
+        });
+        return;
+      }
+
+      // POST /repos/:owner/:repo/git/trees
+      if (method === "POST" && pathname.endsWith("/git/trees")) {
+        const body = JSON.parse(req.postData() || "{}");
+        pushedTreePayloads.push(body);
+
+        const nextMap = new Map(currentTreeEntries.map((item) => [item.path, item]));
+        for (const entry of body.tree || []) {
+          if (entry.sha === null) {
+            nextMap.delete(entry.path);
+          } else {
+            const blobSha = `blob_${ nextMap.size + 1 }_${ Date.now() }_${ Math.random().toString(16).slice(2, 6) }`;
+            blobStore.set(blobSha, entry.content || "");
+            nextMap.set(entry.path, {
+              path: entry.path,
+              mode: entry.mode || "100644",
+              type: "blob",
+              sha: blobSha
+            });
+          }
+        }
+        currentTreeEntries = Array.from(nextMap.values());
+        headTreeSha = `tree_pushed_${ pushedTreePayloads.length }`;
+
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({ sha: headTreeSha, tree: currentTreeEntries })
+        });
+        return;
+      }
+
+      // POST /repos/:owner/:repo/git/commits
+      if (method === "POST" && pathname.endsWith("/git/commits")) {
+        const nextCommit = `commit_pushed_${ pushedTreePayloads.length }_abcdef`;
+        headCommitSha = nextCommit;
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({ sha: nextCommit })
+        });
+        return;
+      }
+
+      // PATCH /repos/:owner/:repo/git/refs/heads/:branch
+      if (method === "PATCH" && pathname.includes("/git/refs/heads/")) {
+        const body = JSON.parse(req.postData() || "{}");
+        headCommitSha = body.sha || headCommitSha;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ object: { sha: headCommitSha } })
+        });
+        return;
+      }
+
+      // GET /repos/:owner/:repo/git/blobs/:sha
+      if (method === "GET" && pathname.includes("/git/blobs/")) {
+        const sha = pathname.split("/git/blobs/")[1];
+        const text = blobStore.get(sha) || "[]";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            sha,
+            encoding: "base64",
+            content: Buffer.from(text, "utf8").toString("base64")
+          })
+        });
+        return;
+      }
+
+      await route.fulfill({ status: 404, body: JSON.stringify({ message: "Not Found" }) });
+    });
+
+    // Lưu cấu hình GitHub với đường dẫn trong thư mục "data/todo-tree.json"
+    await page.click("#tabBtnSettings");
+    await page.fill("#ghOwnerInput", "dev-org");
+    await page.fill("#ghRepoInput", "todo-folder-repo");
+    await page.fill("#ghBranchInput", "main");
+    await page.fill("#ghFilePathInput", "data/todo-tree.json");
+    await page.fill("#ghTokenInput", "ghp_FolderTreeToken1234567890");
+    await page.click("#btnSaveGitHubConfig");
+
+    // 4. Thực hiện Push GitHub -> kiểm tra cấu trúc file theo từng thư mục trong Git Tree
+    await page.click("#btnPushGitHub");
+    await expect(page.locator("#statusBanner")).toContainText("Push thành công");
+    await expect(page.locator("#treeStatusBadge")).toContainText("Cây sạch");
+
+    expect(pushedTreePayloads.length).toBe(1);
+    const firstTree = pushedTreePayloads[0].tree;
+    const pushedPaths = firstTree.map((e) => e.path);
+
+    expect(pushedPaths).toContain("data/todo-tree.json");
+    expect(pushedPaths).toContain("data/Công việc/tasks.json");
+    expect(pushedPaths).toContain("data/Công việc/Dự án A/tasks.json");
+    expect(pushedPaths).toContain("data/Công việc/Dự án A/Sprint 1/tasks.json");
+    expect(pushedPaths).toContain("data/Lưu trữ/tasks.json");
+
+    const workTasksEntry = firstTree.find((e) => e.path === "data/Công việc/tasks.json");
+    const sprintTasksEntry = firstTree.find(
+      (e) => e.path === "data/Công việc/Dự án A/Sprint 1/tasks.json"
+    );
+    const emptyFolderEntry = firstTree.find((e) => e.path === "data/Lưu trữ/tasks.json");
+
+    expect(JSON.parse(workTasksEntry.content)).toHaveLength(1);
+    expect(JSON.parse(workTasksEntry.content)[0].title).toBe("Họp định kỳ đầu tuần");
+    expect(JSON.parse(sprintTasksEntry.content)).toHaveLength(1);
+    expect(JSON.parse(sprintTasksEntry.content)[0].title).toBe("Thiết kế kiến trúc Git Tree");
+    expect(JSON.parse(emptyFolderEntry.content)).toEqual([]);
+
+    // 5. Đổi tên thư mục gốc "Công việc" -> "Work" -> kiểm tra cập nhật dây chuyền xuống nhóm con & xóa thư mục cũ trên Git
+    await page.click("#tabBtnGroups");
+    const rootGroupRow = page.locator('.group-crud-item[data-group-item="Công việc"]');
+    await rootGroupRow.locator(".btn-rename-group").click();
+    await rootGroupRow.locator(".group-rename-input").fill("Work");
+    await rootGroupRow.locator(".btn-save-rename-group").click();
+
+    await expect(page.locator('.group-crud-item[data-group-item="Work"]')).toBeVisible();
+    await expect(page.locator('.group-crud-item[data-group-item="Work/Dự án A"]')).toBeVisible();
+    await expect(
+      page.locator('.group-crud-item[data-group-item="Work/Dự án A/Sprint 1"]')
+    ).toBeVisible();
+    await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
+
+    // Push lần 2 sau khi đổi tên thư mục cha
+    await page.click("#btnPushGitHub");
+    await expect(page.locator("#statusBanner")).toContainText("Push thành công");
+    await expect(page.locator("#treeStatusBadge")).toContainText("Cây sạch");
+
+    expect(pushedTreePayloads.length).toBe(2);
+    const secondTree = pushedTreePayloads[1].tree;
+    const deletedEntries = secondTree.filter((e) => e.sha === null).map((e) => e.path);
+    expect(deletedEntries).toContain("data/Công việc/tasks.json");
+    expect(deletedEntries).toContain("data/Công việc/Dự án A/tasks.json");
+    expect(deletedEntries).toContain("data/Công việc/Dự án A/Sprint 1/tasks.json");
+
+    const createdWorkPaths = secondTree.filter((e) => e.sha !== null).map((e) => e.path);
+    expect(createdWorkPaths).toContain("data/Work/tasks.json");
+    expect(createdWorkPaths).toContain("data/Work/Dự án A/tasks.json");
+    expect(createdWorkPaths).toContain("data/Work/Dự án A/Sprint 1/tasks.json");
+
+    // 6. Kiểm tra Pull GitHub từ cây thư mục trên Git Tree về lại máy
+    await page.click("#btnPullGitHub");
+    await expect(page.locator("#statusBanner")).toContainText(
+      "Pull thành công (2 công việc • 7 thư mục)"
+    );
+    await expect(
+      page.locator('.group-crud-item[data-group-item="Work/Dự án A/Sprint 1"]')
+    ).toBeVisible();
+    await expect(page.locator('.group-crud-item[data-group-item="Lưu trữ"]')).toBeVisible();
+
+    await context.unroute("https://api.github.com/**");
+    assertCleanConsole();
+  });
 });

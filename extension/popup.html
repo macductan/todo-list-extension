@@ -283,16 +283,23 @@
       <section class="ext-view" id="viewGroups" aria-label="Quản lý Nhóm công việc">
         <div class="settings-group">
           <div class="form-header-row">
-            <span class="section-heading">🗂️ Quản lý Nhóm công việc (CRUD)</span>
-            <span class="label-hint">Thứ tự nhóm tại đây cũng là thứ tự hiển thị ngoài danh sách</span>
+            <span class="section-heading">🗂️ Quản lý Cây Thư mục / Nhóm công việc (CRUD)</span>
+            <span class="label-hint">Hỗ trợ phân cấp nhiều tầng (Cha / Con) • Đồng bộ cây thư mục lên GitHub</span>
           </div>
 
           <form class="group-crud-add-row" id="groupCrudAddForm" autocomplete="off">
+            <select
+              id="crudParentGroupSelect"
+              class="ext-select group-parent-select"
+              title="Chọn thư mục cha (mặc định: Thư mục gốc)"
+            >
+              <option value="" selected>📁 Thư mục gốc (Root)</option>
+            </select>
             <input
               type="text"
               id="crudNewGroupInput"
               class="ext-input"
-              placeholder="Nhập tên nhóm mới (VD: Backend, Frontend, Sprint 15, Cá nhân)..."
+              placeholder="Nhập tên thư mục mới (VD: Backend hoặc Công việc/Dự án A/Sprint 1)..."
             />
             <button type="submit" class="btn-primary" id="btnCrudAddGroup">
               ➕ Thêm nhóm

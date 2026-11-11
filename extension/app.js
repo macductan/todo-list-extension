@@ -104,12 +104,91 @@
     return "task-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
   }
 
+  function splitGroupPathSegments(rawPath) {
+    return String(rawPath || "")
+      .split(/(?<!<)\//)
+      .map((seg) => seg.trim())
+      .filter((seg) => seg.length > 0 && seg !== "." && seg !== ".." && !/[\x00-\x1F\x7F]/.test(seg));
+  }
+
+  function normalizeGroupPath(rawPath) {
+    return splitGroupPathSegments(rawPath).join("/");
+  }
+
+  function getGroupDepth(grpPath) {
+    return Math.max(0, splitGroupPathSegments(grpPath).length - 1);
+  }
+
+  function getGroupParentPath(grpPath) {
+    const segs = splitGroupPathSegments(grpPath);
+    return segs.length > 1 ? segs.slice(0, -1).join("/") : "";
+  }
+
+  function getGroupLeafName(grpPath) {
+    const segs = splitGroupPathSegments(grpPath);
+    return segs.length > 0 ? segs[segs.length - 1] : String(grpPath || "").trim();
+  }
+
+  function isSameOrSubgroup(candidatePath, targetParentPath) {
+    const cand = normalizeGroupPath(candidatePath);
+    const target = normalizeGroupPath(targetParentPath);
+    if (!cand || !target) return false;
+    return cand === target || cand.startsWith(target + "/");
+  }
+
+  function ensureGroupHierarchy(rawGroups) {
+    if (!Array.isArray(rawGroups)) return [];
+    const expanded = [];
+    const seenLower = new Map();
+
+    rawGroups.forEach((rawItem) => {
+      const segs = splitGroupPathSegments(rawItem);
+      if (segs.length === 0) return;
+      const builtSegs = [];
+      for (let i = 0; i < segs.length; i += 1) {
+        builtSegs.push(segs[i]);
+        const candidatePath = builtSegs.join("/");
+        const lowerKey = candidatePath.toLowerCase();
+        if (!seenLower.has(lowerKey)) {
+          seenLower.set(lowerKey, candidatePath);
+          expanded.push(candidatePath);
+        } else {
+          builtSegs[i] = splitGroupPathSegments(seenLower.get(lowerKey))[i] || segs[i];
+        }
+      }
+    });
+
+    const childrenByParent = new Map();
+    childrenByParent.set("", []);
+    expanded.forEach((grpPath) => {
+      if (!childrenByParent.has(grpPath)) {
+        childrenByParent.set(grpPath, []);
+      }
+      const parent = getGroupParentPath(grpPath);
+      if (!childrenByParent.has(parent)) {
+        childrenByParent.set(parent, []);
+      }
+      childrenByParent.get(parent).push(grpPath);
+    });
+
+    const ordered = [];
+    function traverse(parentKey) {
+      const kids = childrenByParent.get(parentKey) || [];
+      kids.forEach((kid) => {
+        ordered.push(kid);
+        traverse(kid);
+      });
+    }
+    traverse("");
+    return ordered;
+  }
+
   function sanitizeTaskRecord(raw, fallbackIndex) {
     const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     const rawId = typeof src.id === "string" ? src.id.trim() : "";
     const rawTitle = typeof src.title === "string" ? src.title.trim() : "";
     const rawDesc = typeof src.description === "string" ? src.description : "";
-    const rawGroup = typeof src.group === "string" ? src.group.trim() : "";
+    const rawGroup = typeof src.group === "string" ? normalizeGroupPath(src.group) : "";
     const rawPrio = typeof src.priority === "string" ? src.priority.trim().toLowerCase() : "none";
     const rawStatus = typeof src.status === "string" ? src.status.trim().toLowerCase() : "todo";
     const rawUpdated =
@@ -415,6 +494,7 @@
     collapsedCategoryGroups: new Set(),
     editingGroupName: null,
     deletingGroupName: null,
+    addingSubfolderParent: null,
     pendingFormImages: [],
     githubConfig: {
       owner: "",
@@ -647,6 +727,74 @@
     };
   }
 
+  function getBaseDirFromConfigPath(rawCfgPath) {
+    const norm = normalizeFilePath(rawCfgPath);
+    if (!norm) return "";
+    const segments = norm.split("/").filter(Boolean);
+    if (segments.length === 0) return "";
+    const last = segments[segments.length - 1];
+    if (last.toLowerCase().endsWith(".json")) {
+      return segments.slice(0, -1).join("/");
+    }
+    return segments.join("/");
+  }
+
+  function getManifestPathFromConfigPath(rawCfgPath) {
+    const norm = normalizeFilePath(rawCfgPath);
+    if (!norm) return "tasks.json";
+    if (norm.toLowerCase().endsWith(".json")) {
+      return norm;
+    }
+    return `${norm}/tasks.json`;
+  }
+
+  function encodeFolderSegmentForGitPath(seg) {
+    return String(seg || "")
+      .trim()
+      .replace(/\//g, "%2F");
+  }
+
+  function decodeFolderSegmentFromGitPath(seg) {
+    return String(seg || "")
+      .trim()
+      .replace(/%2F/gi, "/");
+  }
+
+  function getFolderTasksFilePath(rawCfgPath, groupPath) {
+    const baseDir = getBaseDirFromConfigPath(rawCfgPath);
+    const segs = splitGroupPathSegments(groupPath);
+    const safeSegs = (segs.length > 0 ? segs : ["Công việc"]).map(encodeFolderSegmentForGitPath);
+    const relFolder = safeSegs.join("/");
+    return baseDir ? `${baseDir}/${relFolder}/tasks.json` : `${relFolder}/tasks.json`;
+  }
+
+  function extractGroupPathFromGitFilePath(rawCfgPath, gitFilePath) {
+    const normGitPath = normalizeFilePath(gitFilePath);
+    const manifestPath = getManifestPathFromConfigPath(rawCfgPath);
+    if (!normGitPath || normGitPath === manifestPath) return null;
+
+    const baseDir = getBaseDirFromConfigPath(rawCfgPath);
+    let relPath = normGitPath;
+    if (baseDir) {
+      if (!normGitPath.startsWith(baseDir + "/")) {
+        return null;
+      }
+      relPath = normGitPath.slice(baseDir.length + 1);
+    }
+
+    if (!relPath.endsWith("/tasks.json")) {
+      return null;
+    }
+    const rawGroupRel = relPath.slice(0, -"/tasks.json".length);
+    if (!rawGroupRel) return null;
+
+    const decodedSegs = rawGroupRel
+      .split("/")
+      .map(decodeFolderSegmentFromGitPath)
+      .filter(Boolean);
+    return normalizeGroupPath(decodedSegs.join("/")) || null;
+  }
+
   function getGitHubEndpoints(cfg) {
     const encodedOwner = encodeURIComponent(cfg.owner);
     const encodedRepo = encodeURIComponent(cfg.repo);
@@ -660,12 +808,16 @@
       .filter(Boolean)
       .map(encodeURIComponent)
       .join("/");
+    const baseRepoApiUrl = `https://api.github.com/repos/${encodedOwner}/${encodedRepo}`;
 
     return {
       fileUrl: `https://github.com/${encodedOwner}/${encodedRepo}/blob/${encodedBranchPath}/${encodedFilePath}`,
       commitsUrl: `https://github.com/${encodedOwner}/${encodedRepo}/commits/${encodedBranchPath}/${encodedFilePath}`,
-      apiUrl: `https://api.github.com/repos/${encodedOwner}/${encodedRepo}/contents/${encodedFilePath}`,
-      blobsBaseUrl: `https://api.github.com/repos/${encodedOwner}/${encodedRepo}/git/blobs`,
+      apiUrl: `${baseRepoApiUrl}/contents/${encodedFilePath}`,
+      blobsBaseUrl: `${baseRepoApiUrl}/git/blobs`,
+      treesBaseUrl: `${baseRepoApiUrl}/git/trees`,
+      commitsBaseUrl: `${baseRepoApiUrl}/git/commits`,
+      refUrl: `${baseRepoApiUrl}/git/refs/heads/${encodedBranchPath}`,
       encodedRefQuery: encodeURIComponent(cfg.branch)
     };
   }
@@ -689,21 +841,25 @@
       state.tasks = [];
     }
 
+    let rawGroups = [];
     if (Array.isArray(stored.groups) && stored.groups.length > 0) {
       const cleanGroups = stored.groups
-        .filter((g) => typeof g === "string" && g.trim().length > 0)
-        .map((g) => g.trim());
-      state.groups =
-        cleanGroups.length > 0 ? Array.from(new Set(cleanGroups)) : DEFAULT_GROUPS.slice();
+        .filter((g) => typeof g === "string" && normalizeGroupPath(g).length > 0)
+        .map((g) => normalizeGroupPath(g));
+      rawGroups = cleanGroups.length > 0 ? cleanGroups : DEFAULT_GROUPS.slice();
     } else {
-      state.groups = DEFAULT_GROUPS.slice();
+      rawGroups = DEFAULT_GROUPS.slice();
     }
 
     state.tasks.forEach((t) => {
-      if (t.group && !state.groups.includes(t.group)) {
-        state.groups.push(t.group);
+      if (t.group) {
+        rawGroups.push(t.group);
       }
     });
+    state.groups = ensureGroupHierarchy(rawGroups);
+    if (state.groups.length === 0) {
+      state.groups = DEFAULT_GROUPS.slice();
+    }
 
     if (stored.githubConfig && typeof stored.githubConfig === "object") {
       state.githubConfig = {
@@ -1460,11 +1616,16 @@
   }
 
   function renderFiltersAndCounters() {
+    const rawGroupList = state.groups.slice();
     state.tasks.forEach((t) => {
-      if (t.group && !state.groups.includes(t.group)) {
-        state.groups.push(t.group);
+      if (t.group) {
+        rawGroupList.push(t.group);
       }
     });
+    state.groups = ensureGroupHierarchy(rawGroupList);
+    if (state.groups.length === 0) {
+      state.groups = DEFAULT_GROUPS.slice();
+    }
 
     if (state.selectedGroupFilter !== "ALL" && !state.groups.includes(state.selectedGroupFilter)) {
       state.selectedGroupFilter = "ALL";
@@ -1512,7 +1673,9 @@
     const tasksForPriorityCounts =
       state.selectedGroupFilter === "ALL"
         ? baseMatchedTasks
-        : baseMatchedTasks.filter((t) => t.group === state.selectedGroupFilter);
+        : baseMatchedTasks.filter((t) =>
+            isSameOrSubgroup(t.group || "Công việc", state.selectedGroupFilter)
+          );
     const tasksForGroupCounts =
       state.selectedPriorityFilters.size === 0
         ? baseMatchedTasks
@@ -1569,9 +1732,13 @@
     const prevSelected = selectEl.value;
     clearChildren(selectEl);
     state.groups.forEach((grp) => {
+      const depth = getGroupDepth(grp);
       const opt = document.createElement("option");
       opt.value = grp;
-      opt.textContent = "📁 " + grp;
+      opt.textContent =
+        depth > 0
+          ? `${"　".repeat(depth)}↳ 📂 ${getGroupLeafName(grp)} (${grp})`
+          : "📁 " + grp;
       selectEl.appendChild(opt);
     });
     if (state.groups.includes(prevSelected)) {
@@ -1595,12 +1762,17 @@
     barEl.appendChild(allPill);
 
     state.groups.forEach((grp) => {
-      const count = tasksForGroupCounts.filter((t) => t.group === grp).length;
+      const depth = getGroupDepth(grp);
+      const count = tasksForGroupCounts.filter((t) =>
+        isSameOrSubgroup(t.group || "Công việc", grp)
+      ).length;
       const pill = document.createElement("button");
       pill.type = "button";
       pill.className = "filter-pill" + (state.selectedGroupFilter === grp ? " active" : "");
       pill.dataset.group = grp;
-      pill.textContent = `${grp} (${count})`;
+      pill.title = grp;
+      pill.textContent =
+        depth > 0 ? `${"↳ ".repeat(depth)}${getGroupLeafName(grp)} (${count})` : `${grp} (${count})`;
       pill.addEventListener("click", () => {
         state.selectedGroupFilter = grp;
         renderAll();
@@ -1886,10 +2058,18 @@
     return section;
   }
 
-  function createCategoryGroupSectionDOM(groupName, groupTasks, collapseKey, nestPriorityInside) {
+  function createCategoryGroupSectionDOM(
+    groupName,
+    directGroupTasks,
+    collapseKey,
+    nestPriorityInside,
+    subtreeFilteredTasks
+  ) {
+    const depth = getGroupDepth(groupName);
     const section = document.createElement("div");
-    section.className = "group-section";
+    section.className = "group-section" + (depth > 0 ? " group-section-nested" : "");
     section.dataset.groupName = groupName;
+    section.dataset.groupDepth = String(depth);
 
     const effectiveKey = collapseKey || groupName;
     const isCollapsed = state.collapsedCategoryGroups.has(effectiveKey);
@@ -1898,7 +2078,7 @@
     header.type = "button";
     header.className = "group-header";
     header.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-    header.title = isCollapsed ? "Nhấn để hiển thị nhóm công việc" : "Nhấn để thu gọn nhóm công việc";
+    header.title = isCollapsed ? "Nhấn để hiển thị thư mục công việc" : "Nhấn để thu gọn thư mục công việc";
 
     const leftWrap = document.createElement("span");
     leftWrap.className = "section-header-left";
@@ -1908,15 +2088,24 @@
     chevron.textContent = isCollapsed ? "▸" : "▾";
 
     const titleSpan = document.createElement("span");
-    titleSpan.textContent = "📁 " + groupName;
+    if (depth > 0) {
+      titleSpan.textContent = `📂 ${getGroupLeafName(groupName)} (${groupName})`;
+    } else {
+      titleSpan.textContent = "📁 " + groupName;
+    }
 
     leftWrap.appendChild(chevron);
     leftWrap.appendChild(titleSpan);
 
-    const allInGroup = state.tasks.filter((t) => (t.group || "Công việc") === groupName);
-    const doneInGroup = allInGroup.filter((t) => t.status === "done").length;
+    const visibleSubtreeCount = Array.isArray(subtreeFilteredTasks)
+      ? subtreeFilteredTasks.length
+      : directGroupTasks.length;
+    const allInSubtree = state.tasks.filter((t) =>
+      isSameOrSubgroup(t.group || "Công việc", groupName)
+    );
+    const doneInSubtree = allInSubtree.filter((t) => t.status === "done").length;
     const countSpan = document.createElement("span");
-    countSpan.textContent = `${groupTasks.length} hiển thị • Hoàn thành ${doneInGroup}/${allInGroup.length}`;
+    countSpan.textContent = `${visibleSubtreeCount} hiển thị • Hoàn thành ${doneInSubtree}/${allInSubtree.length}`;
 
     header.appendChild(leftWrap);
     header.appendChild(countSpan);
@@ -1932,21 +2121,23 @@
     const body = document.createElement("div");
     body.className = "group-section-body" + (isCollapsed ? " section-collapsed-body" : "");
 
-    if (nestPriorityInside) {
-      PRIORITY_ORDER.forEach((prioKey) => {
-        const prioTasks = groupTasks.filter(
-          (t) => (VALID_PRIORITIES.includes(t.priority) ? t.priority : "none") === prioKey
-        );
-        if (prioTasks.length > 0) {
-          body.appendChild(
-            createPrioritySectionDOM(prioKey, prioTasks, `${groupName}::${prioKey}`)
+    if (directGroupTasks.length > 0) {
+      if (nestPriorityInside) {
+        PRIORITY_ORDER.forEach((prioKey) => {
+          const prioTasks = directGroupTasks.filter(
+            (t) => (VALID_PRIORITIES.includes(t.priority) ? t.priority : "none") === prioKey
           );
-        }
-      });
-    } else {
-      sortTasksDoneAtBottom(groupTasks).forEach((t) => {
-        body.appendChild(createTaskCardDOM(t));
-      });
+          if (prioTasks.length > 0) {
+            body.appendChild(
+              createPrioritySectionDOM(prioKey, prioTasks, `${groupName}::${prioKey}`)
+            );
+          }
+        });
+      } else {
+        sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
+          body.appendChild(createTaskCardDOM(t));
+        });
+      }
     }
 
     section.appendChild(header);
@@ -1969,7 +2160,10 @@
       ) {
         return false;
       }
-      if (state.selectedGroupFilter !== "ALL" && t.group !== state.selectedGroupFilter) {
+      if (
+        state.selectedGroupFilter !== "ALL" &&
+        !isSameOrSubgroup(t.group || "Công việc", state.selectedGroupFilter)
+      ) {
         return false;
       }
       return true;
@@ -1999,21 +2193,50 @@
     }
 
     if (state.groupByCategory) {
-      const orderedGroupNames = state.groups.slice();
+      const rawGroupNames = state.groups.slice();
       sortedFiltered.forEach((task) => {
         const gName = task.group || "Công việc";
-        if (!orderedGroupNames.includes(gName)) {
-          orderedGroupNames.push(gName);
-        }
+        rawGroupNames.push(gName);
       });
+      const orderedGroupNames = ensureGroupHierarchy(rawGroupNames);
+      const sectionByGroup = new Map();
 
       orderedGroupNames.forEach((groupName) => {
-        const groupTasks = sortedFiltered.filter((t) => (t.group || "Công việc") === groupName);
-        if (groupTasks.length > 0) {
-          container.appendChild(
-            createCategoryGroupSectionDOM(groupName, groupTasks, groupName, state.groupByPriority)
-          );
+        if (
+          state.selectedGroupFilter !== "ALL" &&
+          !isSameOrSubgroup(groupName, state.selectedGroupFilter)
+        ) {
+          return;
         }
+        const subtreeTasks = sortedFiltered.filter((t) =>
+          isSameOrSubgroup(t.group || "Công việc", groupName)
+        );
+        if (subtreeTasks.length === 0) {
+          return;
+        }
+        const directTasks = sortedFiltered.filter(
+          (t) => (t.group || "Công việc") === groupName
+        );
+        const sectionEl = createCategoryGroupSectionDOM(
+          groupName,
+          directTasks,
+          groupName,
+          state.groupByPriority,
+          subtreeTasks
+        );
+        sectionByGroup.set(groupName, sectionEl);
+
+        const parentPath = getGroupParentPath(groupName);
+        if (parentPath && sectionByGroup.has(parentPath)) {
+          const parentBody = sectionByGroup
+            .get(parentPath)
+            .querySelector(":scope > .group-section-body");
+          if (parentBody) {
+            parentBody.appendChild(sectionEl);
+            return;
+          }
+        }
+        container.appendChild(sectionEl);
       });
     } else if (state.groupByPriority) {
       PRIORITY_ORDER.forEach((prioKey) => {
@@ -2034,17 +2257,56 @@
   }
 
   function renderGroupCrudList() {
+    const parentSelectEl = document.getElementById("crudParentGroupSelect");
+    if (parentSelectEl) {
+      const prevParent = parentSelectEl.value;
+      clearChildren(parentSelectEl);
+      const rootOpt = document.createElement("option");
+      rootOpt.value = "";
+      rootOpt.textContent = "📁 Thư mục gốc (Root)";
+      parentSelectEl.appendChild(rootOpt);
+
+      state.groups.forEach((grp) => {
+        const depth = getGroupDepth(grp);
+        const opt = document.createElement("option");
+        opt.value = grp;
+        opt.textContent = `${"　".repeat(depth)}↳ Con của: 📁 ${grp}`;
+        parentSelectEl.appendChild(opt);
+      });
+
+      if (prevParent && state.groups.includes(prevParent)) {
+        parentSelectEl.value = prevParent;
+      } else {
+        parentSelectEl.value = "";
+      }
+    }
+
     const listEl = document.getElementById("groupCrudList");
     if (!listEl) return;
     clearChildren(listEl);
 
-    state.groups.forEach((grpName, idx) => {
-      const item = document.createElement("div");
-      item.className = "group-crud-item";
-      item.dataset.groupItem = grpName;
+    state.groups.forEach((grpName) => {
+      const depth = getGroupDepth(grpName);
+      const parentPath = getGroupParentPath(grpName);
+      const siblings = state.groups.filter((g) => getGroupParentPath(g) === parentPath);
+      const siblingIdx = siblings.indexOf(grpName);
 
-      const tasksInGroup = state.tasks.filter((t) => t.group === grpName);
-      const doneInGroup = tasksInGroup.filter((t) => t.status === "done").length;
+      const item = document.createElement("div");
+      item.className = "group-crud-item" + (depth > 0 ? " is-subfolder" : "");
+      item.dataset.groupItem = grpName;
+      item.dataset.groupDepth = String(depth);
+      if (depth > 0) {
+        item.style.marginLeft = `${Math.min(depth * 20, 80)}px`;
+      }
+
+      const directTasks = state.tasks.filter((t) => (t.group || "Công việc") === grpName);
+      const subtreeTasks = state.tasks.filter((t) =>
+        isSameOrSubgroup(t.group || "Công việc", grpName)
+      );
+      const doneInSubtree = subtreeTasks.filter((t) => t.status === "done").length;
+      const childSubfolders = state.groups.filter(
+        (g) => g !== grpName && isSameOrSubgroup(g, grpName)
+      );
 
       const mainRow = document.createElement("div");
       mainRow.className = "group-crud-main";
@@ -2054,45 +2316,69 @@
 
       const nameEl = document.createElement("span");
       nameEl.className = "group-crud-name";
-      nameEl.textContent = "📁 " + grpName;
+      nameEl.textContent = depth > 0 ? `↳ 📂 ${getGroupLeafName(grpName)}` : `📁 ${grpName}`;
+      infoWrap.appendChild(nameEl);
+
+      if (depth > 0) {
+        const pathBadge = document.createElement("span");
+        pathBadge.className = "group-crud-path-badge";
+        pathBadge.textContent = grpName;
+        infoWrap.appendChild(pathBadge);
+      }
 
       const countBadge = document.createElement("span");
       countBadge.className = "group-crud-count";
-      countBadge.textContent = `${tasksInGroup.length} công việc (${doneInGroup} xong)`;
-
-      infoWrap.appendChild(nameEl);
+      if (childSubfolders.length > 0) {
+        countBadge.textContent = `${directTasks.length} việc trực tiếp • Tổng nhánh ${subtreeTasks.length} việc (${doneInSubtree} xong) • ${childSubfolders.length} thư mục con`;
+      } else {
+        countBadge.textContent = `${ subtreeTasks.length } công việc (${doneInSubtree} xong)`;
+      }
       infoWrap.appendChild(countBadge);
 
       const actionsWrap = document.createElement("div");
       actionsWrap.className = "group-crud-actions";
 
+      const btnAddSub = document.createElement("button");
+      btnAddSub.type = "button";
+      btnAddSub.className = "task-action-btn btn-add-subfolder";
+      btnAddSub.textContent = "➕ Nhóm con";
+      btnAddSub.title = `Tạo thư mục con bên trong "${grpName}"`;
+      btnAddSub.addEventListener("click", () => {
+        state.editingGroupName = null;
+        state.deletingGroupName = null;
+        state.addingSubfolderParent =
+          state.addingSubfolderParent === grpName ? null : grpName;
+        renderGroupCrudList();
+      });
+
       const btnUp = document.createElement("button");
       btnUp.type = "button";
       btnUp.className = "task-action-btn btn-move-group-up";
       btnUp.textContent = "↑";
-      btnUp.title = "Đưa nhóm lên trên";
-      btnUp.disabled = idx === 0;
+      btnUp.title = "Đưa nhóm lên trên (cùng cấp)";
+      btnUp.disabled = siblingIdx <= 0;
       btnUp.addEventListener("click", () => {
-        moveGroupOrder(idx, -1);
+        moveGroupOrder(grpName, -1);
       });
 
       const btnDown = document.createElement("button");
       btnDown.type = "button";
       btnDown.className = "task-action-btn btn-move-group-down";
       btnDown.textContent = "↓";
-      btnDown.title = "Đưa nhóm xuống dưới";
-      btnDown.disabled = idx === state.groups.length - 1;
+      btnDown.title = "Đưa nhóm xuống dưới (cùng cấp)";
+      btnDown.disabled = siblingIdx === -1 || siblingIdx >= siblings.length - 1;
       btnDown.addEventListener("click", () => {
-        moveGroupOrder(idx, 1);
+        moveGroupOrder(grpName, 1);
       });
 
       const btnRename = document.createElement("button");
       btnRename.type = "button";
       btnRename.className = "task-action-btn btn-rename-group";
       btnRename.textContent = "✏️ Đổi tên";
-      btnRename.title = "Sửa tên nhóm";
+      btnRename.title = "Sửa tên thư mục / nhóm";
       btnRename.addEventListener("click", () => {
         state.deletingGroupName = null;
+        state.addingSubfolderParent = null;
         state.editingGroupName = state.editingGroupName === grpName ? null : grpName;
         renderGroupCrudList();
       });
@@ -2101,11 +2387,12 @@
       btnDelete.type = "button";
       btnDelete.className = "task-action-btn btn-delete-group";
       btnDelete.textContent = "🗑️ Xóa";
-      btnDelete.title = "Xóa nhóm";
+      btnDelete.title = "Xóa thư mục / nhóm";
       btnDelete.addEventListener("click", () => {
         handleRequestDeleteGroup(grpName);
       });
 
+      actionsWrap.appendChild(btnAddSub);
       actionsWrap.appendChild(btnUp);
       actionsWrap.appendChild(btnDown);
       actionsWrap.appendChild(btnRename);
@@ -2115,6 +2402,50 @@
       mainRow.appendChild(actionsWrap);
       item.appendChild(mainRow);
 
+      if (state.addingSubfolderParent === grpName) {
+        const subRow = document.createElement("div");
+        subRow.className = "group-subfolder-row";
+
+        const subInput = document.createElement("input");
+        subInput.type = "text";
+        subInput.className = "ext-input group-subfolder-input";
+        subInput.placeholder = `Nhập tên thư mục con trong "${grpName}"...`;
+        subInput.style.flex = "1";
+
+        const btnSaveSub = document.createElement("button");
+        btnSaveSub.type = "button";
+        btnSaveSub.className = "btn-primary btn-save-subfolder";
+        btnSaveSub.textContent = "➕ Tạo thư mục con";
+        btnSaveSub.addEventListener("click", () => {
+          executeAddSubfolder(grpName, subInput.value);
+        });
+
+        const btnCancelSub = document.createElement("button");
+        btnCancelSub.type = "button";
+        btnCancelSub.className = "btn-secondary btn-cancel-subfolder";
+        btnCancelSub.textContent = "Hủy";
+        btnCancelSub.addEventListener("click", () => {
+          state.addingSubfolderParent = null;
+          renderGroupCrudList();
+        });
+
+        subInput.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            executeAddSubfolder(grpName, subInput.value);
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            state.addingSubfolderParent = null;
+            renderGroupCrudList();
+          }
+        });
+
+        subRow.appendChild(subInput);
+        subRow.appendChild(btnSaveSub);
+        subRow.appendChild(btnCancelSub);
+        item.appendChild(subRow);
+      }
+
       if (state.editingGroupName === grpName) {
         const renameRow = document.createElement("div");
         renameRow.className = "group-rename-row";
@@ -2122,7 +2453,7 @@
         const renameInput = document.createElement("input");
         renameInput.type = "text";
         renameInput.className = "ext-input group-rename-input";
-        renameInput.value = grpName;
+        renameInput.value = getGroupLeafName(grpName);
         renameInput.style.flex = "1";
 
         const btnSaveRename = document.createElement("button");
@@ -2159,19 +2490,19 @@
         item.appendChild(renameRow);
       }
 
-      if (state.deletingGroupName === grpName && tasksInGroup.length > 0) {
+      if (state.deletingGroupName === grpName && subtreeTasks.length > 0) {
         const confirmRow = document.createElement("div");
         confirmRow.className = "group-delete-confirm-row";
 
         const msgEl = document.createElement("div");
         msgEl.className = "group-delete-confirm-text";
-        msgEl.textContent = `⚠️ Nhóm "${grpName}" đang có ${tasksInGroup.length} công việc. Chọn cách xử lý:`;
+        msgEl.textContent = `⚠️ Thư mục "${grpName}" đang có ${subtreeTasks.length} công việc${childSubfolders.length > 0 ? ` (gồm cả ${childSubfolders.length} thư mục con)` : ""}. Chọn cách xử lý:`;
 
         const targetSelect = document.createElement("select");
         targetSelect.className = "ext-select group-reassign-select";
         targetSelect.style.flex = "1";
         state.groups
-          .filter((g) => g !== grpName)
+          .filter((g) => !isSameOrSubgroup(g, grpName))
           .forEach((otherGrp) => {
             const opt = document.createElement("option");
             opt.value = otherGrp;
@@ -2190,7 +2521,7 @@
         const btnDeleteAll = document.createElement("button");
         btnDeleteAll.type = "button";
         btnDeleteAll.className = "btn-danger-sm btn-confirm-delete-with-tasks";
-        btnDeleteAll.textContent = `🗑️ Xóa nhóm & ${tasksInGroup.length} việc`;
+        btnDeleteAll.textContent = `🗑️ Xóa nhóm & ${subtreeTasks.length} việc`;
         btnDeleteAll.addEventListener("click", () => {
           executeDeleteGroup(grpName, "delete_tasks", null);
         });
@@ -2263,7 +2594,7 @@
 
   async function saveNewGroup() {
     const input = document.getElementById("newGroupInput");
-    const groupName = input.value.trim();
+    const groupName = normalizeGroupPath(input.value);
     if (!groupName) {
       showBanner("Vui lòng nhập tên nhóm mới.", "error");
       input.focus();
@@ -2280,17 +2611,22 @@
     }
 
     const prevGroups = state.groups.slice();
-    state.groups.push(groupName);
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+    state.groups = ensureGroupHierarchy(state.groups.concat([groupName]));
+    const resolvedAdded =
+      state.groups.find((g) => g.toLowerCase() === groupName.toLowerCase()) || groupName;
+    markWorkingTreeDirty();
 
     try {
       await persistAllToStorage();
       input.value = "";
       document.getElementById("newGroupRow").classList.remove("open");
       renderAll();
-      document.getElementById("taskGroupSelect").value = groupName;
-      showBanner(`Đã sẵn sàng nhóm "${groupName}".`, "success");
+      document.getElementById("taskGroupSelect").value = resolvedAdded;
+      showBanner(`Đã sẵn sàng nhóm "${resolvedAdded}".`, "success");
     } catch (err) {
       state.groups = prevGroups;
+      state.syncMeta = prevSyncMeta;
       showBanner(err.message || "Không thể lưu nhóm mới.", "error");
     }
   }
@@ -2300,12 +2636,17 @@
     if (state.isSyncing) return;
 
     const input = document.getElementById("crudNewGroupInput");
-    const groupName = input.value.trim();
-    if (!groupName) {
+    const parentSelect = document.getElementById("crudParentGroupSelect");
+    const selectedParent = parentSelect ? normalizeGroupPath(parentSelect.value) : "";
+    const rawChild = normalizeGroupPath(input.value);
+
+    if (!rawChild) {
       showBanner("Vui lòng nhập tên nhóm mới cần tạo.", "error");
       input.focus();
       return;
     }
+
+    const groupName = selectedParent ? `${selectedParent}/${rawChild}` : rawChild;
 
     if (state.groups.some((g) => g.toLowerCase() === groupName.toLowerCase())) {
       showBanner(`Nhóm "${groupName}" đã tồn tại!`, "error");
@@ -2314,36 +2655,105 @@
     }
 
     const prevGroups = state.groups.slice();
-    state.groups.push(groupName);
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+    state.groups = ensureGroupHierarchy(state.groups.concat([groupName]));
+    markWorkingTreeDirty();
 
     try {
       await persistAllToStorage();
       input.value = "";
       renderAll();
-      showBanner(`Đã thêm nhóm "${groupName}" thành công!`, "success");
+      showBanner(`Đã thêm thư mục "${groupName}" thành công!`, "success");
     } catch (err) {
       state.groups = prevGroups;
+      state.syncMeta = prevSyncMeta;
       showBanner(err.message || "Không thể thêm nhóm mới.", "error");
     }
   }
 
-  async function moveGroupOrder(index, delta) {
+  async function executeAddSubfolder(parentPath, rawSubName) {
     if (state.isSyncing) return;
-    const targetIdx = index + delta;
-    if (index < 0 || index >= state.groups.length || targetIdx < 0 || targetIdx >= state.groups.length) {
+    const cleanParent = normalizeGroupPath(parentPath);
+    const cleanChild = normalizeGroupPath(rawSubName);
+    if (!cleanChild) {
+      showBanner("Vui lòng nhập tên thư mục con!", "error");
+      return;
+    }
+
+    const fullGroupPath = cleanParent ? `${cleanParent}/${cleanChild}` : cleanChild;
+    if (state.groups.some((g) => g.toLowerCase() === fullGroupPath.toLowerCase())) {
+      showBanner(`Thư mục "${fullGroupPath}" đã tồn tại!`, "error");
       return;
     }
 
     const prevGroups = state.groups.slice();
-    const temp = state.groups[index];
-    state.groups[index] = state.groups[targetIdx];
-    state.groups[targetIdx] = temp;
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+    state.groups = ensureGroupHierarchy(state.groups.concat([fullGroupPath]));
+    markWorkingTreeDirty();
+
+    try {
+      await persistAllToStorage();
+      state.addingSubfolderParent = null;
+      renderAll();
+      showBanner(`Đã thêm thư mục con "${fullGroupPath}"!`, "success");
+    } catch (err) {
+      state.groups = prevGroups;
+      state.syncMeta = prevSyncMeta;
+      renderAll();
+      showBanner(err.message || "Không thể tạo thư mục con.", "error");
+    }
+  }
+
+  async function moveGroupOrder(grpOrIdx, delta) {
+    if (state.isSyncing) return;
+    const targetGroup =
+      typeof grpOrIdx === "number" ? state.groups[grpOrIdx] : String(grpOrIdx || "");
+    if (!targetGroup || !state.groups.includes(targetGroup)) {
+      return;
+    }
+
+    const parentPath = getGroupParentPath(targetGroup);
+    const siblings = state.groups.filter((g) => getGroupParentPath(g) === parentPath);
+    const sibIdx = siblings.indexOf(targetGroup);
+    const swapSibIdx = sibIdx + delta;
+    if (sibIdx < 0 || swapSibIdx < 0 || swapSibIdx >= siblings.length) {
+      return;
+    }
+
+    const otherSibling = siblings[swapSibIdx];
+    const blockA = state.groups.filter((g) => isSameOrSubgroup(g, targetGroup));
+    const blockB = state.groups.filter((g) => isSameOrSubgroup(g, otherSibling));
+
+    const prevGroups = state.groups.slice();
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+
+    const firstBlock = delta < 0 ? blockB : blockA;
+    const secondBlock = delta < 0 ? blockA : blockB;
+    const combinedSet = new Set(firstBlock.concat(secondBlock));
+
+    const nextGroups = [];
+    let inserted = false;
+    state.groups.forEach((g) => {
+      if (combinedSet.has(g)) {
+        if (!inserted) {
+          secondBlock.forEach((item) => nextGroups.push(item));
+          firstBlock.forEach((item) => nextGroups.push(item));
+          inserted = true;
+        }
+      } else {
+        nextGroups.push(g);
+      }
+    });
+
+    state.groups = ensureGroupHierarchy(nextGroups);
+    markWorkingTreeDirty();
 
     try {
       await persistAllToStorage();
       renderAll();
     } catch (err) {
       state.groups = prevGroups;
+      state.syncMeta = prevSyncMeta;
       renderAll();
       showBanner(err.message || "Không thể thay đổi thứ tự nhóm.", "error");
     }
@@ -2351,9 +2761,22 @@
 
   async function executeRenameGroup(oldName, rawNewName) {
     if (state.isSyncing) return;
-    const newName = String(rawNewName || "").trim();
-    if (!newName) {
+    const trimmedRaw = String(rawNewName || "").trim();
+    if (!trimmedRaw) {
       showBanner("Tên nhóm không được để trống!", "error");
+      return;
+    }
+
+    const hasExplicitPathSep = /(?<!<)\//.test(trimmedRaw);
+    const oldParent = getGroupParentPath(oldName);
+    const newName = hasExplicitPathSep
+      ? normalizeGroupPath(trimmedRaw)
+      : oldParent
+        ? `${oldParent}/${normalizeGroupPath(trimmedRaw)}`
+        : normalizeGroupPath(trimmedRaw);
+
+    if (!newName) {
+      showBanner("Tên nhóm không hợp lệ!", "error");
       return;
     }
 
@@ -2363,8 +2786,13 @@
       return;
     }
 
+    if (newName.toLowerCase().startsWith(oldName.toLowerCase() + "/")) {
+      showBanner("Không thể đổi tên thư mục cha vào bên trong thư mục con của chính nó!", "error");
+      return;
+    }
+
     const duplicateOther = state.groups.some(
-      (g) => g !== oldName && g.toLowerCase() === newName.toLowerCase()
+      (g) => !isSameOrSubgroup(g, oldName) && g.toLowerCase() === newName.toLowerCase()
     );
     if (duplicateOther) {
       showBanner(`Tên nhóm "${newName}" bị trùng với nhóm đã có!`, "error");
@@ -2376,13 +2804,25 @@
     const prevSelectedFilter = state.selectedGroupFilter;
     const prevSyncMeta = Object.assign({}, state.syncMeta);
 
-    state.groups = state.groups.map((g) => (g === oldName ? newName : g));
+    const mappedGroups = state.groups.map((g) => {
+      if (g === oldName) return newName;
+      if (g.startsWith(oldName + "/")) {
+        return newName + g.slice(oldName.length);
+      }
+      return g;
+    });
+    state.groups = ensureGroupHierarchy(mappedGroups);
 
     let updatedCount = 0;
     const nowIso = new Date().toISOString();
     state.tasks.forEach((t) => {
-      if (t.group === oldName) {
+      const tg = t.group || "Công việc";
+      if (tg === oldName) {
         t.group = newName;
+        t.updatedAt = nowIso;
+        updatedCount++;
+      } else if (tg.startsWith(oldName + "/")) {
+        t.group = newName + tg.slice(oldName.length);
         t.updatedAt = nowIso;
         updatedCount++;
       }
@@ -2390,11 +2830,14 @@
 
     if (state.selectedGroupFilter === oldName) {
       state.selectedGroupFilter = newName;
+    } else if (
+      state.selectedGroupFilter !== "ALL" &&
+      state.selectedGroupFilter.startsWith(oldName + "/")
+    ) {
+      state.selectedGroupFilter = newName + state.selectedGroupFilter.slice(oldName.length);
     }
 
-    if (updatedCount > 0) {
-      markWorkingTreeDirty();
-    }
+    markWorkingTreeDirty();
 
     try {
       await persistAllToStorage();
@@ -2416,25 +2859,30 @@
 
   function handleRequestDeleteGroup(grpName) {
     if (state.isSyncing) return;
-    if (state.groups.length <= 1) {
+    const remainingGroups = state.groups.filter((g) => !isSameOrSubgroup(g, grpName));
+    if (remainingGroups.length === 0) {
       showBanner("Cần giữ lại ít nhất 1 nhóm công việc mặc định!", "error");
       return;
     }
 
-    const tasksInGroup = state.tasks.filter((t) => t.group === grpName);
-    if (tasksInGroup.length === 0) {
+    const tasksInSubtree = state.tasks.filter((t) =>
+      isSameOrSubgroup(t.group || "Công việc", grpName)
+    );
+    if (tasksInSubtree.length === 0) {
       executeDeleteGroup(grpName, "empty", null);
       return;
     }
 
     state.editingGroupName = null;
+    state.addingSubfolderParent = null;
     state.deletingGroupName = state.deletingGroupName === grpName ? null : grpName;
     renderGroupCrudList();
   }
 
   async function executeDeleteGroup(grpName, actionMode, reassignTarget) {
     if (state.isSyncing) return;
-    if (state.groups.length <= 1) {
+    const remainingGroups = state.groups.filter((g) => !isSameOrSubgroup(g, grpName));
+    if (remainingGroups.length === 0) {
       showBanner("Cần giữ lại ít nhất 1 nhóm công việc mặc định!", "error");
       return;
     }
@@ -2444,17 +2892,18 @@
     const prevSelectedFilter = state.selectedGroupFilter;
     const prevSyncMeta = Object.assign({}, state.syncMeta);
 
-    state.groups = state.groups.filter((g) => g !== grpName);
-    const fallbackGroup = reassignTarget && state.groups.includes(reassignTarget)
-      ? reassignTarget
-      : state.groups[0];
+    state.groups = remainingGroups;
+    const fallbackGroup =
+      reassignTarget && state.groups.includes(reassignTarget)
+        ? reassignTarget
+        : state.groups[0];
 
     let affectedTasks = 0;
     const nowIso = new Date().toISOString();
 
     if (actionMode === "reassign") {
       state.tasks.forEach((t) => {
-        if (t.group === grpName) {
+        if (isSameOrSubgroup(t.group || "Công việc", grpName)) {
           t.group = fallbackGroup;
           t.updatedAt = nowIso;
           affectedTasks++;
@@ -2463,7 +2912,7 @@
     } else if (actionMode === "delete_tasks") {
       const removedIds = new Set();
       state.tasks = state.tasks.filter((t) => {
-        if (t.group === grpName) {
+        if (isSameOrSubgroup(t.group || "Công việc", grpName)) {
           removedIds.add(t.id);
           affectedTasks++;
           return false;
@@ -2480,13 +2929,14 @@
       }
     }
 
-    if (state.selectedGroupFilter === grpName) {
+    if (
+      state.selectedGroupFilter !== "ALL" &&
+      isSameOrSubgroup(state.selectedGroupFilter, grpName)
+    ) {
       state.selectedGroupFilter = "ALL";
     }
 
-    if (affectedTasks > 0) {
-      markWorkingTreeDirty();
-    }
+    markWorkingTreeDirty();
 
     try {
       await persistAllToStorage();
@@ -2939,6 +3389,386 @@
     return { status: response.status, conflict: false, data };
   }
 
+  async function githubGetBranchTreeState(cfg) {
+    const { refUrl, treesBaseUrl } = getGitHubEndpoints(cfg);
+    const refResp = await fetchWithTimeout(
+      refUrl,
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, false)
+      },
+      FETCH_TIMEOUT_MS
+    );
+
+    if (refResp.status === 401) {
+      throw new Error(
+        "Xác thực thất bại (401): Personal Access Token không hợp lệ hoặc đã hết hạn."
+      );
+    }
+    if (isRateLimitedResponse(refResp)) {
+      throw new Error(
+        `Vượt giới hạn tần suất gọi GitHub API (${refResp.status} Rate Limit). Vui lòng thử lại sau ít phút.`
+      );
+    }
+    if (refResp.status === 403) {
+      throw new Error(
+        "Từ chối truy cập (403): Token thiếu quyền 'Contents: Read and write' cho repository này."
+      );
+    }
+    if (!refResp.ok) {
+      return { supported: false };
+    }
+
+    const refData = await readJsonSafe(refResp);
+    const headCommitSha =
+      refData &&
+      refData.object &&
+      typeof refData.object.sha === "string" &&
+      refData.object.sha.trim()
+        ? refData.object.sha.trim()
+        : "";
+    if (!headCommitSha) {
+      return { supported: false };
+    }
+
+    const treeResp = await fetchWithTimeout(
+      `${treesBaseUrl}/${encodeURIComponent(headCommitSha)}?recursive=1`,
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, false)
+      },
+      FETCH_TIMEOUT_MS
+    );
+    if (!treeResp.ok) {
+      return { supported: false };
+    }
+
+    const treeData = await readJsonSafe(treeResp);
+    if (!treeData || !Array.isArray(treeData.tree)) {
+      return { supported: false };
+    }
+
+    return {
+      supported: true,
+      headCommitSha,
+      rootTreeSha:
+        typeof treeData.sha === "string" && treeData.sha.trim()
+          ? treeData.sha.trim()
+          : headCommitSha,
+      treeItems: treeData.tree
+    };
+  }
+
+  async function githubReadBlobText(cfg, blobItem) {
+    if (!blobItem || typeof blobItem !== "object") return "";
+    const fileSize = Number(blobItem.size || 0);
+    if (fileSize > MAX_SAFE_REMOTE_BYTES) {
+      throw new Error(
+        "File dữ liệu trên GitHub vượt quá giới hạn an toàn 8 MB của bộ nhớ cục bộ Extension."
+      );
+    }
+    if (typeof blobItem.content === "string" && blobItem.content.trim().length > 0) {
+      if (blobItem.encoding === "utf-8") {
+        return blobItem.content;
+      }
+      return base64ToUtf8(blobItem.content);
+    }
+    if (!blobItem.sha) return "";
+
+    const { blobsBaseUrl } = getGitHubEndpoints(cfg);
+    const blobResp = await fetchWithTimeout(
+      `${blobsBaseUrl}/${encodeURIComponent(blobItem.sha)}`,
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, false)
+      },
+      FETCH_TIMEOUT_MS
+    );
+    if (!blobResp.ok) {
+      throw new Error(
+        `Không thể tải nội dung file từ cây thư mục Git (${blobResp.status}).`
+      );
+    }
+    const blobData = await readJsonSafe(blobResp);
+    if (!blobData || typeof blobData.content !== "string") {
+      return "";
+    }
+    if (blobData.encoding === "utf-8") {
+      return blobData.content;
+    }
+    return base64ToUtf8(blobData.content);
+  }
+
+  async function githubPullFolderTree(cfg, treeState) {
+    const manifestPath = getManifestPathFromConfigPath(cfg.path);
+    const manifestItem = treeState.treeItems.find(
+      (item) => item && item.type === "blob" && normalizeFilePath(item.path) === manifestPath
+    );
+
+    const folderBlobEntries = [];
+    treeState.treeItems.forEach((item) => {
+      if (!item || item.type !== "blob") return;
+      const grpPath = extractGroupPathFromGitFilePath(cfg.path, item.path);
+      if (grpPath !== null) {
+        folderBlobEntries.push({ groupPath: grpPath, item });
+      }
+    });
+
+    if (!manifestItem && folderBlobEntries.length === 0) {
+      return { status: 404, data: null };
+    }
+
+    let manifestGroups = [];
+    let manifestTasks = [];
+
+    if (manifestItem) {
+      const rawManifestText = (await githubReadBlobText(cfg, manifestItem)).trim();
+      if (rawManifestText.length > 0) {
+        let parsedManifest;
+        try {
+          parsedManifest = JSON.parse(rawManifestText);
+        } catch (_) {
+          throw new Error("Nội dung file manifest JSON trên GitHub bị lỗi cú pháp.");
+        }
+        if (Array.isArray(parsedManifest)) {
+          manifestTasks = parsedManifest;
+        } else if (parsedManifest && typeof parsedManifest === "object") {
+          if (Array.isArray(parsedManifest.groups)) {
+            manifestGroups = parsedManifest.groups
+              .filter((g) => typeof g === "string" && normalizeGroupPath(g).length > 0)
+              .map(normalizeGroupPath);
+          }
+          if (Array.isArray(parsedManifest.tasks)) {
+            manifestTasks = parsedManifest.tasks;
+          }
+        }
+      }
+    }
+
+    let nextTasks = [];
+    const discoveredFolderPaths = [];
+
+    if (folderBlobEntries.length > 0) {
+      const rawCollectedTasks = [];
+      for (const entry of folderBlobEntries) {
+        discoveredFolderPaths.push(entry.groupPath);
+        const rawFolderText = (await githubReadBlobText(cfg, entry.item)).trim();
+        if (!rawFolderText) continue;
+        let parsedFolderJson;
+        try {
+          parsedFolderJson = JSON.parse(rawFolderText);
+        } catch (_) {
+          throw new Error(
+            `Nội dung file JSON trong thư mục "${entry.groupPath}" trên GitHub bị lỗi cú pháp.`
+          );
+        }
+        const folderTaskArr = Array.isArray(parsedFolderJson)
+          ? parsedFolderJson
+          : parsedFolderJson && Array.isArray(parsedFolderJson.tasks)
+            ? parsedFolderJson.tasks
+            : null;
+        if (!Array.isArray(folderTaskArr)) {
+          throw new Error(
+            `Cấu trúc dữ liệu trong thư mục "${entry.groupPath}/tasks.json" không hợp lệ.`
+          );
+        }
+        folderTaskArr.forEach((taskItem) => {
+          if (taskItem && typeof taskItem === "object" && !Array.isArray(taskItem)) {
+            rawCollectedTasks.push(Object.assign({}, taskItem, { group: entry.groupPath }));
+          }
+        });
+      }
+      nextTasks = normalizeTaskList(rawCollectedTasks, false);
+    } else {
+      nextTasks = normalizeTaskList(manifestTasks, true);
+    }
+
+    const mergedGroups = ensureGroupHierarchy(
+      manifestGroups
+        .concat(discoveredFolderPaths)
+        .concat(nextTasks.map((t) => t.group).filter(Boolean))
+    );
+
+    return {
+      status: 200,
+      remoteSha: treeState.headCommitSha,
+      tasks: nextTasks,
+      groups: mergedGroups.length > 0 ? mergedGroups : state.groups.slice()
+    };
+  }
+
+  async function githubPushFolderTree(cfg, treeState, tasksArray, groupsArray, isForcePush) {
+    const { treesBaseUrl, commitsBaseUrl, refUrl } = getGitHubEndpoints(cfg);
+    const manifestPath = getManifestPathFromConfigPath(cfg.path);
+
+    let effectiveGroups = ensureGroupHierarchy(
+      (Array.isArray(groupsArray) ? groupsArray : []).concat(
+        tasksArray.map((t) => t.group).filter(Boolean)
+      )
+    );
+    if (effectiveGroups.length === 0) {
+      effectiveGroups = DEFAULT_GROUPS.slice();
+    }
+
+    const expectedFolderFiles = new Map();
+    effectiveGroups.forEach((grp) => {
+      const filePath = getFolderTasksFilePath(cfg.path, grp);
+      const folderTasks = tasksArray
+        .filter((t) => (t.group || "Công việc") === grp)
+        .map(serializeTaskForExport);
+      expectedFolderFiles.set(filePath, JSON.stringify(folderTasks, null, 2));
+    });
+
+    const treeEntries = [];
+
+    // Xóa các file <oldFolder>/tasks.json của thư mục đã bị xóa hoặc đổi tên trên cây Git
+    treeState.treeItems.forEach((item) => {
+      if (!item || item.type !== "blob") return;
+      const oldGrp = extractGroupPathFromGitFilePath(cfg.path, item.path);
+      const normPath = normalizeFilePath(item.path);
+      if (oldGrp !== null && !expectedFolderFiles.has(normPath)) {
+        treeEntries.push({
+          path: normPath,
+          mode: "100644",
+          type: "blob",
+          sha: null
+        });
+      }
+    });
+
+    // Ghi từng file <folderPath>/tasks.json theo đúng cấu trúc cây thư mục thật trên GitHub
+    expectedFolderFiles.forEach((jsonContent, filePath) => {
+      treeEntries.push({
+        path: filePath,
+        mode: "100644",
+        type: "blob",
+        content: jsonContent
+      });
+    });
+
+    // Ghi file manifest gốc lưu thứ tự cây thư mục (groups) và metadata đồng bộ
+    const allSerializedTasks = tasksArray.map(serializeTaskForExport);
+    const manifestPayload = {
+      version: 2,
+      format: "folder-tree",
+      updatedAt: new Date().toISOString(),
+      groups: effectiveGroups,
+      folders: effectiveGroups.map((grp) => ({
+        path: grp,
+        file: getFolderTasksFilePath(cfg.path, grp),
+        taskCount: tasksArray.filter((t) => (t.group || "Công việc") === grp).length
+      })),
+      tasks: allSerializedTasks
+    };
+    treeEntries.push({
+      path: manifestPath,
+      mode: "100644",
+      type: "blob",
+      content: JSON.stringify(manifestPayload, null, 2)
+    });
+
+    const createTreeResp = await fetchWithTimeout(
+      treesBaseUrl,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, true),
+        body: JSON.stringify({
+          base_tree: treeState.rootTreeSha,
+          tree: treeEntries
+        })
+      },
+      FETCH_TIMEOUT_MS
+    );
+
+    if (createTreeResp.status === 409) {
+      return { status: 409, conflict: true };
+    }
+    if (createTreeResp.status === 422) {
+      const errBody = await readJsonSafe(createTreeResp);
+      const apiMsg = errBody && typeof errBody.message === "string" ? errBody.message : "";
+      if (/\bsha\b|does not match/i.test(apiMsg)) {
+        return { status: 422, conflict: true };
+      }
+      const detail = apiMsg ? `: ${sanitizeErrorMessage(apiMsg, cfg.token)}` : ".";
+      throw new Error(`GitHub từ chối tạo Git Tree (422)${detail}`);
+    }
+    if (!createTreeResp.ok) {
+      throw new Error(`Lỗi khi tạo cây thư mục Git Tree (${createTreeResp.status}).`);
+    }
+
+    const createdTree = await readJsonSafe(createTreeResp);
+    if (!createdTree || typeof createdTree.sha !== "string" || !createdTree.sha.trim()) {
+      throw new Error("Phản hồi Git Tree từ GitHub không hợp lệ.");
+    }
+
+    const createCommitResp = await fetchWithTimeout(
+      commitsBaseUrl,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, true),
+        body: JSON.stringify({
+          message: `Sync ${allSerializedTasks.length} tasks across ${effectiveGroups.length} folders via GitTask Sync`,
+          tree: createdTree.sha.trim(),
+          parents: [treeState.headCommitSha]
+        })
+      },
+      FETCH_TIMEOUT_MS
+    );
+
+    if (!createCommitResp.ok) {
+      throw new Error(`Lỗi khi tạo Git Commit (${createCommitResp.status}).`);
+    }
+    const createdCommit = await readJsonSafe(createCommitResp);
+    if (!createdCommit || typeof createdCommit.sha !== "string" || !createdCommit.sha.trim()) {
+      throw new Error("Phản hồi Git Commit từ GitHub không hợp lệ.");
+    }
+
+    const newCommitSha = createdCommit.sha.trim();
+    const updateRefResp = await fetchWithTimeout(
+      refUrl,
+      {
+        method: "PATCH",
+        cache: "no-store",
+        headers: buildGitHubHeaders(cfg.token, true),
+        body: JSON.stringify({
+          sha: newCommitSha,
+          force: Boolean(isForcePush)
+        })
+      },
+      FETCH_TIMEOUT_MS
+    );
+
+    if (updateRefResp.status === 409) {
+      return { status: 409, conflict: true };
+    }
+    if (updateRefResp.status === 422) {
+      const errBody = await readJsonSafe(updateRefResp);
+      const apiMsg = errBody && typeof errBody.message === "string" ? errBody.message : "";
+      if (/fast-forward|sha|reference/i.test(apiMsg)) {
+        return { status: 422, conflict: true };
+      }
+      const detail = apiMsg ? `: ${sanitizeErrorMessage(apiMsg, cfg.token)}` : ".";
+      throw new Error(`GitHub từ chối cập nhật nhánh (422)${detail}`);
+    }
+    if (!updateRefResp.ok) {
+      throw new Error(`Lỗi khi cập nhật nhánh trên GitHub (${updateRefResp.status}).`);
+    }
+
+    return {
+      status: 200,
+      conflict: false,
+      data: {
+        content: { sha: newCommitSha },
+        commit: { sha: newCommitSha }
+      }
+    };
+  }
+
   function requireValidConfigOrRedirect() {
     const check = validateGitHubConfig(state.githubConfig);
     if (!check.valid) {
@@ -2970,8 +3800,115 @@
       showBanner("Đang tải dữ liệu mới nhất từ GitHub...", "info", {
         autoHideMs: FETCH_TIMEOUT_MS + 1000
       });
-      const getRes = await githubGetFile(cfg);
       const currentRepoKey = buildRepoKey(cfg);
+
+      const treeState = await githubGetBranchTreeState(cfg);
+      if (treeState.supported) {
+        const treePullRes = await githubPullFolderTree(cfg, treeState);
+        if (treePullRes.status === 404) {
+          if (isForcePull) {
+            const prevTasks = state.tasks.slice();
+            const prevMeta = Object.assign({}, state.syncMeta);
+            state.tasks = [];
+            state.syncMeta = {
+              base_sha: null,
+              lastSyncAt: new Date().toISOString(),
+              syncedRepoKey: currentRepoKey,
+              dirty: false,
+              firstDirtyAt: null,
+              lastDirtyAt: null,
+              autoPushPausedReason: null,
+              autoPushOwnerId: null
+            };
+            try {
+              await persistAllToStorage();
+            } catch (storageErr) {
+              state.tasks = prevTasks;
+              state.syncMeta = prevMeta;
+              throw storageErr;
+            }
+            if (document.getElementById("taskEditId").value.trim()) {
+              resetTaskForm();
+            }
+            hideConflictAlert();
+            renderAll();
+            showBanner(
+              "Force Pull hoàn tất: Cây thư mục chưa tồn tại hoặc đã bị xóa trên GitHub, đã đồng bộ danh sách trống.",
+              "info"
+            );
+            return true;
+          }
+          showBanner(
+            "Dữ liệu chưa tồn tại trên GitHub (404). Bạn có thể nhấn 'Push GitHub' để khởi tạo cây thư mục mới.",
+            "info"
+          );
+          return false;
+        }
+
+        const remoteSha = String(treePullRes.remoteSha || "");
+        const hasLocalChanges =
+          state.syncMeta.dirty &&
+          (state.tasks.length > 0 ||
+            Boolean(state.syncMeta.base_sha) ||
+            state.groups.join("\n") !== DEFAULT_GROUPS.join("\n"));
+
+        if (!isForcePull && hasLocalChanges) {
+          const localLabel = state.syncMeta.base_sha
+            ? `${state.syncMeta.base_sha.slice(0, 7)} (đã sửa)`
+            : "cục bộ chưa Push";
+          showConflictAlert(
+            cfg,
+            localLabel,
+            remoteSha,
+            "Bạn đang có thay đổi công việc hoặc thư mục cục bộ chưa được Push lên GitHub. Hệ thống tạm dừng Pull để tránh ghi đè — hãy chọn 'Force Pull' (lấy bản GitHub) hoặc 'Force Push' (ghi đè lên GitHub)."
+          );
+          showBanner("Tạm dừng Pull để bảo vệ thay đổi cục bộ chưa đồng bộ!", "error");
+          return false;
+        }
+
+        const prevTasks = state.tasks;
+        const prevGroups = state.groups;
+        const prevMeta = state.syncMeta;
+
+        state.tasks = treePullRes.tasks;
+        state.groups = treePullRes.groups;
+        state.syncMeta = {
+          base_sha: remoteSha,
+          lastSyncAt: new Date().toISOString(),
+          syncedRepoKey: currentRepoKey,
+          dirty: false,
+          firstDirtyAt: null,
+          lastDirtyAt: null,
+          autoPushPausedReason: null,
+          autoPushOwnerId: null
+        };
+
+        try {
+          await persistAllToStorage();
+        } catch (storageErr) {
+          state.tasks = prevTasks;
+          state.groups = prevGroups;
+          state.syncMeta = prevMeta;
+          throw storageErr;
+        }
+
+        if (document.getElementById("taskEditId").value.trim()) {
+          resetTaskForm();
+        }
+
+        hideConflictAlert();
+        renderAll();
+
+        showBanner(
+          isForcePull
+            ? `Force Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`
+            : `Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`,
+          "success"
+        );
+        return true;
+      }
+
+      const getRes = await githubGetFile(cfg);
 
       if (getRes.status === 404 || !getRes.data) {
         if (isForcePull) {
@@ -3036,6 +3973,7 @@
       const rawText = base64ToUtf8(getRes.data.content || "").trim();
 
       let rawTaskArray = [];
+      let rawGroupArray = [];
       if (rawText.length > 0) {
         let parsedJson;
         try {
@@ -3052,25 +3990,31 @@
           Array.isArray(parsedJson.tasks)
         ) {
           rawTaskArray = parsedJson.tasks;
+          if (Array.isArray(parsedJson.groups)) {
+            rawGroupArray = parsedJson.groups
+              .filter((g) => typeof g === "string" && normalizeGroupPath(g).length > 0)
+              .map(normalizeGroupPath);
+          }
         } else {
           throw new Error("Cấu trúc dữ liệu trên GitHub không phải mảng danh sách công việc hợp lệ.");
         }
       }
 
       const nextTasks = normalizeTaskList(rawTaskArray, true);
-      const nextGroups = state.groups.slice();
+      const baseGroupSeed = rawGroupArray.length > 0 ? rawGroupArray : state.groups.slice();
       nextTasks.forEach((t) => {
-        if (t.group && !nextGroups.includes(t.group)) {
-          nextGroups.push(t.group);
+        if (t.group) {
+          baseGroupSeed.push(t.group);
         }
       });
+      const nextGroups = ensureGroupHierarchy(baseGroupSeed);
 
       const prevTasks = state.tasks;
       const prevGroups = state.groups;
       const prevMeta = state.syncMeta;
 
       state.tasks = nextTasks;
-      state.groups = nextGroups;
+      state.groups = nextGroups.length > 0 ? nextGroups : DEFAULT_GROUPS.slice();
       state.syncMeta = {
         base_sha: remoteSha,
         lastSyncAt: new Date().toISOString(),
@@ -3132,6 +4076,7 @@
 
     const pushStartedLastDirtyAt = state.syncMeta.lastDirtyAt || 0;
     const tasksSnapshot = state.tasks.slice();
+    const groupsSnapshot = state.groups.slice();
 
     setSyncButtonsDisabled(true);
     try {
@@ -3149,61 +4094,130 @@
           ? state.syncMeta.base_sha
           : null;
 
-      const remoteCheck = await githubGetFile(cfg);
-      const remoteSha =
-        remoteCheck.status === 200 && remoteCheck.data ? String(remoteCheck.data.sha || "") : null;
+      const treeState = await githubGetBranchTreeState(cfg);
+      let putRes;
 
-      if (!isForcePush) {
-        if (remoteSha && localBaseSha && remoteSha !== localBaseSha) {
-          await pauseAutoPushOnConflict("Xung đột GitHub");
-          showConflictAlert(
-            cfg,
-            localBaseSha,
-            remoteSha,
-            "Dữ liệu trên GitHub đã bị sửa đổi từ nơi khác (Remote SHA khác với base_sha cục bộ). Hệ thống đã dừng ghi đè."
-          );
-          showBanner("Dừng ghi đè: Phát hiện xung đột dữ liệu (Conflict) trên GitHub!", "error");
-          return { ok: false, conflict: true, remoteSha };
+      if (treeState.supported) {
+        const manifestPath = getManifestPathFromConfigPath(cfg.path);
+        const hasRemoteTodoData = treeState.treeItems.some(
+          (item) =>
+            item &&
+            item.type === "blob" &&
+            (normalizeFilePath(item.path) === manifestPath ||
+              extractGroupPathFromGitFilePath(cfg.path, item.path) !== null)
+        );
+        const remoteSha = hasRemoteTodoData ? treeState.headCommitSha : null;
+
+        if (!isForcePush) {
+          if (remoteSha && localBaseSha && remoteSha !== localBaseSha) {
+            await pauseAutoPushOnConflict("Xung đột GitHub");
+            showConflictAlert(
+              cfg,
+              localBaseSha,
+              remoteSha,
+              "Cây thư mục dữ liệu trên GitHub đã bị sửa đổi từ nơi khác (Remote SHA khác với base_sha cục bộ). Hệ thống đã dừng ghi đè."
+            );
+            showBanner("Dừng ghi đè: Phát hiện xung đột dữ liệu (Conflict) trên GitHub!", "error");
+            return { ok: false, conflict: true, remoteSha };
+          }
+
+          if (remoteSha && !localBaseSha) {
+            await pauseAutoPushOnConflict("Xung đột GitHub");
+            showConflictAlert(
+              cfg,
+              "chưa đồng bộ",
+              remoteSha,
+              "Cây thư mục dữ liệu đã tồn tại sẵn trên GitHub nhưng thiết bị này chưa từng Pull về. Đã dừng ghi đè để tránh mất dữ liệu từ xa."
+            );
+            showBanner(
+              "Dừng ghi đè: Dữ liệu đã tồn tại trên GitHub, hãy kiểm tra hoặc Force Pull/Push!",
+              "error"
+            );
+            return { ok: false, conflict: true, remoteSha };
+          }
+
+          if (!remoteSha && localBaseSha) {
+            await pauseAutoPushOnConflict("File từ xa bị xóa");
+            showConflictAlert(
+              cfg,
+              localBaseSha,
+              "đã bị xóa (404)",
+              "Cây dữ liệu trên GitHub đã bị xóa từ nơi khác so với lần đồng bộ trước. Hãy kiểm tra lịch sử commit hoặc nhấn Force Push để tạo lại."
+            );
+            showBanner("Dừng ghi đè: Phát hiện dữ liệu trên GitHub đã bị xóa từ xa!", "error");
+            return { ok: false, conflict: true, remoteSha: null };
+          }
         }
 
-        if (remoteSha && !localBaseSha) {
-          await pauseAutoPushOnConflict("Xung đột GitHub");
-          showConflictAlert(
-            cfg,
-            "chưa đồng bộ",
-            remoteSha,
-            "File dữ liệu đã tồn tại sẵn trên GitHub nhưng thiết bị này chưa từng Pull về. Đã dừng ghi đè để tránh mất dữ liệu từ xa."
-          );
-          showBanner(
-            "Dừng ghi đè: File đã tồn tại trên GitHub, hãy kiểm tra hoặc Force Pull/Push!",
-            "error"
-          );
-          return { ok: false, conflict: true, remoteSha };
+        putRes = await githubPushFolderTree(
+          cfg,
+          treeState,
+          tasksSnapshot,
+          groupsSnapshot,
+          isForcePush
+        );
+      } else {
+        const remoteCheck = await githubGetFile(cfg);
+        const remoteSha =
+          remoteCheck.status === 200 && remoteCheck.data ? String(remoteCheck.data.sha || "") : null;
+
+        if (!isForcePush) {
+          if (remoteSha && localBaseSha && remoteSha !== localBaseSha) {
+            await pauseAutoPushOnConflict("Xung đột GitHub");
+            showConflictAlert(
+              cfg,
+              localBaseSha,
+              remoteSha,
+              "Dữ liệu trên GitHub đã bị sửa đổi từ nơi khác (Remote SHA khác với base_sha cục bộ). Hệ thống đã dừng ghi đè."
+            );
+            showBanner("Dừng ghi đè: Phát hiện xung đột dữ liệu (Conflict) trên GitHub!", "error");
+            return { ok: false, conflict: true, remoteSha };
+          }
+
+          if (remoteSha && !localBaseSha) {
+            await pauseAutoPushOnConflict("Xung đột GitHub");
+            showConflictAlert(
+              cfg,
+              "chưa đồng bộ",
+              remoteSha,
+              "File dữ liệu đã tồn tại sẵn trên GitHub nhưng thiết bị này chưa từng Pull về. Đã dừng ghi đè để tránh mất dữ liệu từ xa."
+            );
+            showBanner(
+              "Dừng ghi đè: File đã tồn tại trên GitHub, hãy kiểm tra hoặc Force Pull/Push!",
+              "error"
+            );
+            return { ok: false, conflict: true, remoteSha };
+          }
+
+          if (!remoteSha && localBaseSha) {
+            await pauseAutoPushOnConflict("File từ xa bị xóa");
+            showConflictAlert(
+              cfg,
+              localBaseSha,
+              "đã bị xóa (404)",
+              "File trên GitHub đã bị xóa từ nơi khác so với lần đồng bộ trước. Hãy kiểm tra lịch sử commit hoặc nhấn Force Push để tạo lại."
+            );
+            showBanner("Dừng ghi đè: Phát hiện file trên GitHub đã bị xóa từ xa!", "error");
+            return { ok: false, conflict: true, remoteSha: null };
+          }
         }
 
-        if (!remoteSha && localBaseSha) {
-          await pauseAutoPushOnConflict("File từ xa bị xóa");
-          showConflictAlert(
-            cfg,
-            localBaseSha,
-            "đã bị xóa (404)",
-            "File trên GitHub đã bị xóa từ nơi khác so với lần đồng bộ trước. Hãy kiểm tra lịch sử commit hoặc nhấn Force Push để tạo lại."
-          );
-          showBanner("Dừng ghi đè: Phát hiện file trên GitHub đã bị xóa từ xa!", "error");
-          return { ok: false, conflict: true, remoteSha: null };
-        }
+        const shaToUse = isForcePush ? remoteSha : localBaseSha || remoteSha;
+        putRes = await githubPutFile(cfg, tasksSnapshot, shaToUse);
       }
-
-      const shaToUse = isForcePush ? remoteSha : localBaseSha || remoteSha;
-      const putRes = await githubPutFile(cfg, tasksSnapshot, shaToUse);
 
       if (putRes.conflict) {
         await pauseAutoPushOnConflict("Xung đột 409");
         let latestRemoteSha = "đã thay đổi (409)";
         try {
-          const recheck = await githubGetFile(cfg);
-          if (recheck.status === 200 && recheck.data && recheck.data.sha) {
-            latestRemoteSha = recheck.data.sha;
+          const recheckTree = await githubGetBranchTreeState(cfg);
+          if (recheckTree.supported && recheckTree.headCommitSha) {
+            latestRemoteSha = recheckTree.headCommitSha;
+          } else {
+            const recheck = await githubGetFile(cfg);
+            if (recheck.status === 200 && recheck.data && recheck.data.sha) {
+              latestRemoteSha = recheck.data.sha;
+            }
           }
         } catch (_) {
           // Giữ nhãn mặc định nếu không đọc lại được SHA
@@ -3429,8 +4443,12 @@
       }
       state.syncMeta.autoPushPausedReason = null;
       if (state.syncMeta.dirty) {
-        if (!state.syncMeta.firstDirtyAt) state.syncMeta.firstDirtyAt = now;
-        if (!state.syncMeta.lastDirtyAt) state.syncMeta.lastDirtyAt = now;
+        if (!prevRepoKey || !state.syncMeta.firstDirtyAt) {
+          state.syncMeta.firstDirtyAt = now;
+        }
+        if (!prevRepoKey || !state.syncMeta.lastDirtyAt) {
+          state.syncMeta.lastDirtyAt = now;
+        }
         state.syncMeta.autoPushOwnerId = INSTANCE_ID;
       }
     }
@@ -3586,6 +4604,7 @@
       tabBtnGroups.addEventListener("click", () => {
         state.editingGroupName = null;
         state.deletingGroupName = null;
+        state.addingSubfolderParent = null;
         renderGroupCrudList();
         switchTab("groups");
       });
@@ -3605,6 +4624,7 @@
       btnQuickGroups.addEventListener("click", () => {
         state.editingGroupName = null;
         state.deletingGroupName = null;
+        state.addingSubfolderParent = null;
         renderGroupCrudList();
         switchTab("groups");
         const crudInput = document.getElementById("crudNewGroupInput");
