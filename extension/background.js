@@ -3,6 +3,7 @@
 const DEFAULT_GROUPS = ["Công việc", "Dự án GitHub", "Cá nhân", "Khẩn cấp"];
 const FLOATING_WIN_WIDTH = 920;
 const FLOATING_WIN_HEIGHT = 700;
+const NATIVE_UPDATER_HOST = "com.gittask.updater";
 
 function applyActionLaunchMode(launchMode) {
   if (!chrome.action || typeof chrome.action.setPopup !== "function") {
@@ -178,6 +179,55 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "OPEN_FLOATING_WINDOW") {
     openOrFocusFloatingWindow(sendResponse);
     return true;
+  }
+  if (message && message.type === "NATIVE_UPDATER") {
+    const action = message.action === "git_pull" ? "git_pull" : "ping";
+    if (!chrome.runtime || typeof chrome.runtime.sendNativeMessage !== "function") {
+      sendResponse({
+        ok: false,
+        nativeHostMissing: true,
+        error: "Trình duyệt chưa hỗ trợ Native Messaging hoặc thiếu quyền nativeMessaging."
+      });
+      return false;
+    }
+    chrome.runtime.sendNativeMessage(NATIVE_UPDATER_HOST, { action }, (resp) => {
+      const err = chrome.runtime && chrome.runtime.lastError;
+      if (err || !resp) {
+        sendResponse({
+          ok: false,
+          nativeHostMissing: true,
+          error: (err && err.message) || "Không thể kết nối tới Native Messaging Host."
+        });
+        return;
+      }
+      if (action === "git_pull" && resp.ok && resp.updated) {
+        const notice = {
+          fromCommit: String(resp.beforeCommit || ""),
+          toCommit: String(resp.afterCommit || ""),
+          subject: String(resp.latestSubject || ""),
+          at: Date.now()
+        };
+        chrome.storage.local.set({ lastExtUpdateNotice: notice }, () => {
+          void (chrome.runtime && chrome.runtime.lastError);
+          sendResponse(resp);
+          if (!message.skipAutoReload) {
+            setTimeout(() => {
+              chrome.runtime.reload();
+            }, 700);
+          }
+        });
+        return;
+      }
+      sendResponse(resp);
+    });
+    return true;
+  }
+  if (message && message.type === "RELOAD_EXTENSION") {
+    sendResponse({ ok: true });
+    setTimeout(() => {
+      chrome.runtime.reload();
+    }, 100);
+    return false;
   }
   return false;
 });

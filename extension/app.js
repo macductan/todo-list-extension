@@ -3,13 +3,12 @@
 
   const DEFAULT_GROUPS = ["Công việc", "Dự án GitHub", "Cá nhân", "Khẩn cấp"];
   const VALID_PRIORITIES = ["none", "low", "medium", "high"];
-  const PRIORITY_ORDER = ["high", "medium", "low", "none"];
   const PRIO_WEIGHT = { high: 3, medium: 2, low: 1, none: 0 };
   const PRIORITY_META = {
-    high: { badgeLabel: "High", sectionLabel: "Ưu tiên Cao (High)", pillLabel: "High" },
-    medium: { badgeLabel: "Medium", sectionLabel: "Ưu tiên Trung bình (Medium)", pillLabel: "Medium" },
-    low: { badgeLabel: "Low", sectionLabel: "Ưu tiên Thấp (Low)", pillLabel: "Low" },
-    none: { badgeLabel: "Không ưu tiên", sectionLabel: "Không ưu tiên", pillLabel: "Không ưu tiên" }
+    high: { badgeLabel: "High" },
+    medium: { badgeLabel: "Medium" },
+    low: { badgeLabel: "Low" },
+    none: { badgeLabel: "Không ưu tiên" }
   };
   const MAX_IMAGE_COUNT_PER_TASK = 6;
   const MAX_SAFE_REMOTE_BYTES = 8 * 1024 * 1024;
@@ -469,6 +468,38 @@
     }
   }
 
+  function formatDateInputYYYYMMDD(dateObj) {
+    const d = dateObj instanceof Date ? dateObj : new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function getDefaultClearCutoffDateString() {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return formatDateInputYYYYMMDD(d);
+  }
+
+  function getCutoffTimestampMs(dateStr) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || "").trim());
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const d = new Date(year, month - 1, day, 23, 59, 59, 999);
+    if (
+      Number.isNaN(d.getTime()) ||
+      d.getFullYear() !== year ||
+      d.getMonth() !== month - 1 ||
+      d.getDate() !== day
+    ) {
+      return null;
+    }
+    return d.getTime();
+  }
+
   /* ========================================================================
      3. APPLICATION STATE (ZERO HARDCODED CREDENTIALS)
      ======================================================================== */
@@ -480,18 +511,14 @@
   const state = {
     tasks: [],
     groups: DEFAULT_GROUPS.slice(),
-    selectedGroupFilter: "ALL",
-    selectedPriorityFilters: new Set(),
     statusFilter: "todo",
     searchQuery: "",
-    groupByPriority: true,
-    groupByCategory: true,
     theme: "dark",
     launchMode: "popup",
     openDescriptions: new Set(),
     expandedDescriptions: new Set(),
-    collapsedPriorityGroups: new Set(),
-    collapsedCategoryGroups: new Set(),
+    expandedCategoryGroups: new Set(),
+    clearDoneCutoffDate: getDefaultClearCutoffDateString(),
     editingGroupName: null,
     deletingGroupName: null,
     addingSubfolderParent: null,
@@ -521,6 +548,7 @@
       autoPushOwnerId: null
     },
     isSyncing: false,
+    isUpdatingExt: false,
     isSavingStorage: false,
     autoPushTimerId: null,
     treeCountdownIntervalId: null,
@@ -915,12 +943,6 @@
     }
 
     if (stored.uiPrefs && typeof stored.uiPrefs === "object") {
-      if (typeof stored.uiPrefs.groupByPriority === "boolean") {
-        state.groupByPriority = stored.uiPrefs.groupByPriority;
-      }
-      if (typeof stored.uiPrefs.groupByCategory === "boolean") {
-        state.groupByCategory = stored.uiPrefs.groupByCategory;
-      }
       if (stored.uiPrefs.theme === "light" || stored.uiPrefs.theme === "dark") {
         state.theme = stored.uiPrefs.theme;
       }
@@ -992,8 +1014,6 @@
         autoPushConfig: state.autoPushConfig,
         syncMeta: state.syncMeta,
         uiPrefs: {
-          groupByPriority: state.groupByPriority,
-          groupByCategory: state.groupByCategory,
           theme: state.theme,
           launchMode: state.launchMode
         }
@@ -1279,7 +1299,13 @@
       const el = document.getElementById(id);
       if (el) el.disabled = disabled;
     });
+    const updaterIds = ["btnUpdateExtension", "btnSettingsUpdateExt", "btnCheckUpdaterStatus"];
+    updaterIds.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = Boolean(disabled || state.isUpdatingExt);
+    });
     updateTreeStatusUI();
+    renderDoneClearBar();
   }
 
   function showConflictAlert(cfg, localShaLabel, remoteShaLabel, customReason) {
@@ -1596,12 +1622,9 @@
     }
   }
 
-  function getNormalizedPriority(task) {
-    return VALID_PRIORITIES.includes(task.priority) ? task.priority : "none";
-  }
-
   function taskMatchesBaseFilters(task, normalizedQuery) {
-    if (state.statusFilter !== "all" && task.status !== state.statusFilter) {
+    const targetStatus = state.statusFilter === "done" ? "done" : "todo";
+    if (task.status !== targetStatus) {
       return false;
     }
     if (normalizedQuery) {
@@ -1613,6 +1636,94 @@
       }
     }
     return true;
+  }
+
+  function getDoneTasksEligibleForClear(cutoffDateStr) {
+    const cutoffMs = getCutoffTimestampMs(cutoffDateStr);
+    if (cutoffMs === null) return [];
+    return state.tasks.filter(
+      (t) => t.status === "done" && parseTimestampSafe(t.updatedAt) <= cutoffMs
+    );
+  }
+
+  function renderDoneClearBar() {
+    const barEl = document.getElementById("doneClearBar");
+    const dateInput = document.getElementById("clearDoneDateInput");
+    const clearBtn = document.getElementById("btnClearDoneTasks");
+    if (!barEl || !dateInput || !clearBtn) return;
+
+    const isDoneTab = state.statusFilter === "done";
+    barEl.classList.toggle("hidden-control", !isDoneTab);
+
+    if (state.clearDoneCutoffDate === null || state.clearDoneCutoffDate === undefined) {
+      state.clearDoneCutoffDate = getDefaultClearCutoffDateString();
+    }
+    if (dateInput.value !== state.clearDoneCutoffDate) {
+      dateInput.value = state.clearDoneCutoffDate;
+    }
+
+    const defaultCutoff = getDefaultClearCutoffDateString();
+    const eligible = getDoneTasksEligibleForClear(state.clearDoneCutoffDate);
+    const count = eligible.length;
+
+    if (!state.clearDoneCutoffDate || getCutoffTimestampMs(state.clearDoneCutoffDate) === null) {
+      clearBtn.textContent = "🗑️ Xóa task đã xong (0)";
+      clearBtn.disabled = true;
+      return;
+    }
+
+    if (state.clearDoneCutoffDate === defaultCutoff) {
+      clearBtn.textContent = `🗑️ Xóa task quá 30 ngày (${count})`;
+    } else {
+      clearBtn.textContent = `🗑️ Xóa task từ ${state.clearDoneCutoffDate} trở về trước (${count})`;
+    }
+    clearBtn.disabled = state.isSyncing || count === 0;
+  }
+
+  async function handleClearDoneTasks() {
+    if (state.isSyncing) return;
+    const cutoffStr = state.clearDoneCutoffDate;
+    const cutoffMs = getCutoffTimestampMs(cutoffStr);
+    if (cutoffMs === null) {
+      showBanner("Vui lòng chọn ngày hợp lệ để dọn dẹp công việc đã xong.", "error");
+      return;
+    }
+
+    const toRemove = getDoneTasksEligibleForClear(cutoffStr);
+    if (toRemove.length === 0) {
+      showBanner("Không có công việc đã xong nào cần xóa theo mốc ngày đã chọn.", "info");
+      return;
+    }
+
+    const removeIds = new Set(toRemove.map((t) => t.id));
+    const prevTasks = state.tasks.slice();
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+    const prevOpen = new Set(state.openDescriptions);
+    const prevExpanded = new Set(state.expandedDescriptions);
+
+    state.tasks = state.tasks.filter((t) => !removeIds.has(t.id));
+    removeIds.forEach((id) => {
+      state.openDescriptions.delete(id);
+      state.expandedDescriptions.delete(id);
+    });
+    markWorkingTreeDirty();
+
+    try {
+      await persistAllToStorage();
+      const activeEditId = document.getElementById("taskEditId").value.trim();
+      if (activeEditId && removeIds.has(activeEditId)) {
+        resetTaskForm();
+      }
+      renderAll();
+      showBanner(`Đã xóa ${removeIds.size} công việc đã xong từ ${cutoffStr} trở về trước.`, "info");
+    } catch (err) {
+      state.tasks = prevTasks;
+      state.syncMeta = prevSyncMeta;
+      state.openDescriptions = prevOpen;
+      state.expandedDescriptions = prevExpanded;
+      renderAll();
+      showBanner(err.message || "Không thể xóa công việc đã xong.", "error");
+    }
   }
 
   function renderFiltersAndCounters() {
@@ -1627,21 +1738,15 @@
       state.groups = DEFAULT_GROUPS.slice();
     }
 
-    if (state.selectedGroupFilter !== "ALL" && !state.groups.includes(state.selectedGroupFilter)) {
-      state.selectedGroupFilter = "ALL";
+    if (state.statusFilter !== "todo" && state.statusFilter !== "done") {
+      state.statusFilter = "todo";
     }
-    Array.from(state.selectedPriorityFilters).forEach((p) => {
-      if (!VALID_PRIORITIES.includes(p)) {
-        state.selectedPriorityFilters.delete(p);
-      }
-    });
 
     const todoCount = state.tasks.filter((t) => t.status !== "done").length;
     const doneCount = state.tasks.filter((t) => t.status === "done").length;
     const totalCount = state.tasks.length;
 
     document.getElementById("countTodoBadge").textContent = String(todoCount);
-    document.getElementById("countAllBadge").textContent = String(totalCount);
     document.getElementById("countDoneBadge").textContent = String(doneCount);
     document.getElementById("navTaskCount").textContent = String(totalCount);
     const navGrpCountEl = document.getElementById("navGroupCount");
@@ -1652,80 +1757,9 @@
     document.querySelectorAll(".status-seg-btn").forEach((btn) => {
       btn.classList.toggle("active", btn.getAttribute("data-statusfilter") === state.statusFilter);
     });
-    document.getElementById("statusFilterSelect").value = state.statusFilter;
-
-    const prioToggleBtn = document.getElementById("btnTogglePriorityGroup");
-    if (prioToggleBtn) {
-      prioToggleBtn.textContent = state.groupByPriority
-        ? "🚩 Nhóm Priority: BẬT"
-        : "🚩 Nhóm Priority: TẮT";
-      prioToggleBtn.classList.toggle("accent-outline", state.groupByPriority);
-    }
-
-    const groupToggleBtn = document.getElementById("btnToggleGroupBy");
-    groupToggleBtn.textContent = state.groupByCategory
-      ? "🗂 Nhóm Group: BẬT"
-      : "🗂 Nhóm Group: TẮT";
-    groupToggleBtn.classList.toggle("accent-outline", state.groupByCategory);
-
-    const query = state.searchQuery.trim().toLowerCase();
-    const baseMatchedTasks = state.tasks.filter((t) => taskMatchesBaseFilters(t, query));
-    const tasksForPriorityCounts =
-      state.selectedGroupFilter === "ALL"
-        ? baseMatchedTasks
-        : baseMatchedTasks.filter((t) =>
-            isSameOrSubgroup(t.group || "Công việc", state.selectedGroupFilter)
-          );
-    const tasksForGroupCounts =
-      state.selectedPriorityFilters.size === 0
-        ? baseMatchedTasks
-        : baseMatchedTasks.filter((t) =>
-            state.selectedPriorityFilters.has(getNormalizedPriority(t))
-          );
-
-    const prioBarEl = document.getElementById("priorityFilterBar");
-    if (prioBarEl) {
-      clearChildren(prioBarEl);
-
-      const isAllPriorities = state.selectedPriorityFilters.size === 0;
-      const allPrioPill = document.createElement("button");
-      allPrioPill.type = "button";
-      allPrioPill.className = "filter-pill" + (isAllPriorities ? " active" : "");
-      allPrioPill.dataset.priority = "ALL";
-      allPrioPill.setAttribute("aria-pressed", isAllPriorities ? "true" : "false");
-      allPrioPill.title = "Hiển thị tất cả cờ ưu tiên (bỏ chọn các cờ đang lọc)";
-      allPrioPill.textContent = `Tất cả cờ (${tasksForPriorityCounts.length})`;
-      allPrioPill.addEventListener("click", () => {
-        state.selectedPriorityFilters.clear();
-        renderAll();
-      });
-      prioBarEl.appendChild(allPrioPill);
-
-      PRIORITY_ORDER.forEach((prioKey) => {
-        const count = tasksForPriorityCounts.filter(
-          (t) => getNormalizedPriority(t) === prioKey
-        ).length;
-        const isSelected = state.selectedPriorityFilters.has(prioKey);
-        const pill = document.createElement("button");
-        pill.type = "button";
-        pill.className = "filter-pill" + (isSelected ? " active" : "");
-        pill.dataset.priority = prioKey;
-        pill.setAttribute("aria-pressed", isSelected ? "true" : "false");
-        pill.title = `Chọn/bỏ chọn cờ ${PRIORITY_META[prioKey].pillLabel} (có thể chọn nhiều cờ cùng lúc)`;
-        pill.appendChild(createPriorityFlagSvg(prioKey));
-        const lbl = document.createElement("span");
-        lbl.textContent = `${PRIORITY_META[prioKey].pillLabel} (${count})`;
-        pill.appendChild(lbl);
-        pill.addEventListener("click", () => {
-          if (state.selectedPriorityFilters.has(prioKey)) {
-            state.selectedPriorityFilters.delete(prioKey);
-          } else {
-            state.selectedPriorityFilters.add(prioKey);
-          }
-          renderAll();
-        });
-        prioBarEl.appendChild(pill);
-      });
+    const statusSelectEl = document.getElementById("statusFilterSelect");
+    if (statusSelectEl) {
+      statusSelectEl.value = state.statusFilter;
     }
 
     const selectEl = document.getElementById("taskGroupSelect");
@@ -1747,38 +1781,7 @@
       selectEl.value = state.groups[0];
     }
 
-    const barEl = document.getElementById("groupFilterBar");
-    clearChildren(barEl);
-
-    const allPill = document.createElement("button");
-    allPill.type = "button";
-    allPill.className = "filter-pill" + (state.selectedGroupFilter === "ALL" ? " active" : "");
-    allPill.dataset.group = "ALL";
-    allPill.textContent = `Tất cả nhóm (${tasksForGroupCounts.length})`;
-    allPill.addEventListener("click", () => {
-      state.selectedGroupFilter = "ALL";
-      renderAll();
-    });
-    barEl.appendChild(allPill);
-
-    state.groups.forEach((grp) => {
-      const depth = getGroupDepth(grp);
-      const count = tasksForGroupCounts.filter((t) =>
-        isSameOrSubgroup(t.group || "Công việc", grp)
-      ).length;
-      const pill = document.createElement("button");
-      pill.type = "button";
-      pill.className = "filter-pill" + (state.selectedGroupFilter === grp ? " active" : "");
-      pill.dataset.group = grp;
-      pill.title = grp;
-      pill.textContent =
-        depth > 0 ? `${"↳ ".repeat(depth)}${getGroupLeafName(grp)} (${count})` : `${grp} (${count})`;
-      pill.addEventListener("click", () => {
-        state.selectedGroupFilter = grp;
-        renderAll();
-      });
-      barEl.appendChild(pill);
-    });
+    renderDoneClearBar();
   }
 
   function createTaskCardDOM(task) {
@@ -2000,70 +2003,30 @@
     return card;
   }
 
-  function createPrioritySectionDOM(prioKey, prioTasks, collapseKey) {
-    const section = document.createElement("div");
-    section.className = "priority-section";
-    section.dataset.priorityGroup = prioKey;
-
-    const effectiveKey = collapseKey || prioKey;
-    const isCollapsed = state.collapsedPriorityGroups.has(effectiveKey);
-
-    const header = document.createElement("button");
-    header.type = "button";
-    header.className = "priority-header prio-" + prioKey;
-    header.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-    header.title = isCollapsed
-      ? "Nhấn để hiển thị nhóm Priority"
-      : "Nhấn để ẩn/thu gọn nhóm Priority";
-
-    const leftWrap = document.createElement("span");
-    leftWrap.className = "section-header-left";
-
-    const chevron = document.createElement("span");
-    chevron.className = "section-chevron";
-    chevron.textContent = isCollapsed ? "▸" : "▾";
-
-    const flagSvg = createPriorityFlagSvg(prioKey);
-
-    const titleSpan = document.createElement("span");
-    titleSpan.textContent = PRIORITY_META[prioKey].sectionLabel;
-
-    leftWrap.appendChild(chevron);
-    leftWrap.appendChild(flagSvg);
-    leftWrap.appendChild(titleSpan);
-
-    const doneInPrio = prioTasks.filter((t) => t.status === "done").length;
-    const countSpan = document.createElement("span");
-    countSpan.textContent = `${prioTasks.length} công việc • Hoàn thành ${doneInPrio}/${prioTasks.length}`;
-
-    header.appendChild(leftWrap);
-    header.appendChild(countSpan);
-    header.addEventListener("click", () => {
-      if (state.collapsedPriorityGroups.has(effectiveKey)) {
-        state.collapsedPriorityGroups.delete(effectiveKey);
-      } else {
-        state.collapsedPriorityGroups.add(effectiveKey);
-      }
-      renderTaskList();
-    });
-
-    const body = document.createElement("div");
-    body.className = "priority-section-body" + (isCollapsed ? " section-collapsed-body" : "");
-    sortTasksDoneAtBottom(prioTasks).forEach((t) => {
-      body.appendChild(createTaskCardDOM(t));
-    });
-
-    section.appendChild(header);
-    section.appendChild(body);
-    return section;
+  function openAddTaskForGroup(groupName) {
+    resetTaskForm();
+    const targetGroup = normalizeGroupPath(groupName) || state.groups[0] || "Công việc";
+    if (!state.groups.includes(targetGroup)) {
+      state.groups = ensureGroupHierarchy(state.groups.concat([targetGroup]));
+    }
+    renderFiltersAndCounters();
+    const groupSelect = document.getElementById("taskGroupSelect");
+    if (groupSelect) {
+      groupSelect.value = targetGroup;
+    }
+    switchTab("add");
+    const titleInput = document.getElementById("taskTitleInput");
+    if (titleInput) {
+      titleInput.focus();
+    }
   }
 
   function createCategoryGroupSectionDOM(
     groupName,
     directGroupTasks,
     collapseKey,
-    nestPriorityInside,
-    subtreeFilteredTasks
+    subtreeFilteredTasks,
+    hasChildSections
   ) {
     const depth = getGroupDepth(groupName);
     const section = document.createElement("div");
@@ -2072,13 +2035,16 @@
     section.dataset.groupDepth = String(depth);
 
     const effectiveKey = collapseKey || groupName;
-    const isCollapsed = state.collapsedCategoryGroups.has(effectiveKey);
+    const isCollapsed = !state.expandedCategoryGroups.has(effectiveKey);
 
-    const header = document.createElement("button");
-    header.type = "button";
+    const header = document.createElement("div");
     header.className = "group-header";
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
     header.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-    header.title = isCollapsed ? "Nhấn để hiển thị thư mục công việc" : "Nhấn để thu gọn thư mục công việc";
+    header.title = isCollapsed
+      ? "Nhấn để mở rộng thư mục công việc"
+      : "Nhấn để thu gọn thư mục công việc";
 
     const leftWrap = document.createElement("span");
     leftWrap.className = "section-header-left";
@@ -2100,44 +2066,62 @@
     const visibleSubtreeCount = Array.isArray(subtreeFilteredTasks)
       ? subtreeFilteredTasks.length
       : directGroupTasks.length;
-    const allInSubtree = state.tasks.filter((t) =>
-      isSameOrSubgroup(t.group || "Công việc", groupName)
-    );
-    const doneInSubtree = allInSubtree.filter((t) => t.status === "done").length;
+
+    const rightWrap = document.createElement("span");
+    rightWrap.className = "section-header-right";
+
     const countSpan = document.createElement("span");
-    countSpan.textContent = `${visibleSubtreeCount} hiển thị • Hoàn thành ${doneInSubtree}/${allInSubtree.length}`;
+    countSpan.className = "group-task-count";
+    countSpan.textContent = `${visibleSubtreeCount} công việc`;
+
+    const btnAddInFolder = document.createElement("button");
+    btnAddInFolder.type = "button";
+    btnAddInFolder.className = "btn-folder-add-task";
+    btnAddInFolder.textContent = "➕ Thêm";
+    btnAddInFolder.title = `Thêm công việc vào thư mục "${groupName}"`;
+    btnAddInFolder.setAttribute("aria-label", `Thêm công việc vào thư mục ${groupName}`);
+    btnAddInFolder.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openAddTaskForGroup(groupName);
+    });
+    btnAddInFolder.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+    });
+
+    rightWrap.appendChild(countSpan);
+    rightWrap.appendChild(btnAddInFolder);
 
     header.appendChild(leftWrap);
-    header.appendChild(countSpan);
-    header.addEventListener("click", () => {
-      if (state.collapsedCategoryGroups.has(effectiveKey)) {
-        state.collapsedCategoryGroups.delete(effectiveKey);
+    header.appendChild(rightWrap);
+
+    const toggleFolderExpand = () => {
+      if (state.expandedCategoryGroups.has(effectiveKey)) {
+        state.expandedCategoryGroups.delete(effectiveKey);
       } else {
-        state.collapsedCategoryGroups.add(effectiveKey);
+        state.expandedCategoryGroups.add(effectiveKey);
       }
       renderTaskList();
+    };
+    header.addEventListener("click", toggleFolderExpand);
+    header.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggleFolderExpand();
+      }
     });
 
     const body = document.createElement("div");
     body.className = "group-section-body" + (isCollapsed ? " section-collapsed-body" : "");
 
     if (directGroupTasks.length > 0) {
-      if (nestPriorityInside) {
-        PRIORITY_ORDER.forEach((prioKey) => {
-          const prioTasks = directGroupTasks.filter(
-            (t) => (VALID_PRIORITIES.includes(t.priority) ? t.priority : "none") === prioKey
-          );
-          if (prioTasks.length > 0) {
-            body.appendChild(
-              createPrioritySectionDOM(prioKey, prioTasks, `${groupName}::${prioKey}`)
-            );
-          }
-        });
-      } else {
-        sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
-          body.appendChild(createTaskCardDOM(t));
-        });
-      }
+      sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
+        body.appendChild(createTaskCardDOM(t));
+      });
+    } else if (!hasChildSections) {
+      const emptyHint = document.createElement("div");
+      emptyHint.className = "folder-empty-hint";
+      emptyHint.textContent = "Chưa có công việc nào trong thư mục này.";
+      body.appendChild(emptyHint);
     }
 
     section.appendChild(header);
@@ -2150,108 +2134,74 @@
     clearChildren(container);
 
     const query = state.searchQuery.trim().toLowerCase();
-    const filtered = state.tasks.filter((t) => {
-      if (!taskMatchesBaseFilters(t, query)) {
-        return false;
-      }
-      if (
-        state.selectedPriorityFilters.size > 0 &&
-        !state.selectedPriorityFilters.has(getNormalizedPriority(t))
-      ) {
-        return false;
-      }
-      if (
-        state.selectedGroupFilter !== "ALL" &&
-        !isSameOrSubgroup(t.group || "Công việc", state.selectedGroupFilter)
-      ) {
-        return false;
-      }
-      return true;
-    });
-
+    const filtered = state.tasks.filter((t) => taskMatchesBaseFilters(t, query));
     const sortedFiltered = sortTasksDoneAtBottom(filtered);
+    const showEmptyFolders = state.statusFilter === "todo" && !query;
 
-    if (sortedFiltered.length === 0) {
+    if (sortedFiltered.length === 0 && !showEmptyFolders) {
       const emptyBox = document.createElement("div");
       emptyBox.className = "empty-state-box";
-      if (state.tasks.length === 0) {
-        emptyBox.textContent =
-          "Danh sách công việc đang trống. Nhấn '+ Tạo Task' để thêm công việc mới hoặc 'Pull GitHub' để tải dữ liệu về.";
-      } else if (
-        state.statusFilter === "todo" &&
-        !query &&
-        state.selectedGroupFilter === "ALL" &&
-        state.selectedPriorityFilters.size === 0
-      ) {
-        emptyBox.textContent =
-          "🎉 Không còn công việc nào ở trạng thái Chưa làm! Chuyển sang mục 'Tất cả' hoặc 'Đã xong' để xem các việc đã hoàn thành.";
+      if (query) {
+        emptyBox.textContent = "Không có công việc nào khớp với từ khóa tìm kiếm.";
       } else {
-        emptyBox.textContent = "Không có công việc nào khớp với bộ lọc hiện tại.";
+        emptyBox.textContent = "Chưa có công việc nào được đánh dấu Đã xong.";
       }
       container.appendChild(emptyBox);
       return;
     }
 
-    if (state.groupByCategory) {
-      const rawGroupNames = state.groups.slice();
-      sortedFiltered.forEach((task) => {
-        const gName = task.group || "Công việc";
-        rawGroupNames.push(gName);
-      });
-      const orderedGroupNames = ensureGroupHierarchy(rawGroupNames);
-      const sectionByGroup = new Map();
+    const rawGroupNames = state.groups.slice();
+    sortedFiltered.forEach((task) => {
+      const gName = task.group || "Công việc";
+      rawGroupNames.push(gName);
+    });
+    const orderedGroupNames = ensureGroupHierarchy(rawGroupNames);
+    const groupsToRender = orderedGroupNames.filter((groupName) => {
+      if (showEmptyFolders) return true;
+      return sortedFiltered.some((t) => isSameOrSubgroup(t.group || "Công việc", groupName));
+    });
 
-      orderedGroupNames.forEach((groupName) => {
-        if (
-          state.selectedGroupFilter !== "ALL" &&
-          !isSameOrSubgroup(groupName, state.selectedGroupFilter)
-        ) {
-          return;
-        }
-        const subtreeTasks = sortedFiltered.filter((t) =>
-          isSameOrSubgroup(t.group || "Công việc", groupName)
-        );
-        if (subtreeTasks.length === 0) {
-          return;
-        }
-        const directTasks = sortedFiltered.filter(
-          (t) => (t.group || "Công việc") === groupName
-        );
-        const sectionEl = createCategoryGroupSectionDOM(
-          groupName,
-          directTasks,
-          groupName,
-          state.groupByPriority,
-          subtreeTasks
-        );
-        sectionByGroup.set(groupName, sectionEl);
-
-        const parentPath = getGroupParentPath(groupName);
-        if (parentPath && sectionByGroup.has(parentPath)) {
-          const parentBody = sectionByGroup
-            .get(parentPath)
-            .querySelector(":scope > .group-section-body");
-          if (parentBody) {
-            parentBody.appendChild(sectionEl);
-            return;
-          }
-        }
-        container.appendChild(sectionEl);
-      });
-    } else if (state.groupByPriority) {
-      PRIORITY_ORDER.forEach((prioKey) => {
-        const prioTasks = sortedFiltered.filter(
-          (t) => (VALID_PRIORITIES.includes(t.priority) ? t.priority : "none") === prioKey
-        );
-        if (prioTasks.length > 0) {
-          container.appendChild(createPrioritySectionDOM(prioKey, prioTasks, prioKey));
-        }
-      });
-    } else {
-      sortedFiltered.forEach((t) => {
-        container.appendChild(createTaskCardDOM(t));
-      });
+    if (groupsToRender.length === 0) {
+      const emptyBox = document.createElement("div");
+      emptyBox.className = "empty-state-box";
+      emptyBox.textContent =
+        "Danh sách công việc đang trống. Nhấn '+ Tạo Task' để thêm công việc mới hoặc 'Pull GitHub' để tải dữ liệu về.";
+      container.appendChild(emptyBox);
+      return;
     }
+
+    const sectionByGroup = new Map();
+    groupsToRender.forEach((groupName) => {
+      const subtreeTasks = sortedFiltered.filter((t) =>
+        isSameOrSubgroup(t.group || "Công việc", groupName)
+      );
+      const directTasks = sortedFiltered.filter(
+        (t) => (t.group || "Công việc") === groupName
+      );
+      const hasChildSections = groupsToRender.some(
+        (other) => getGroupParentPath(other) === groupName
+      );
+      const sectionEl = createCategoryGroupSectionDOM(
+        groupName,
+        directTasks,
+        groupName,
+        subtreeTasks,
+        hasChildSections
+      );
+      sectionByGroup.set(groupName, sectionEl);
+
+      const parentPath = getGroupParentPath(groupName);
+      if (parentPath && sectionByGroup.has(parentPath)) {
+        const parentBody = sectionByGroup
+          .get(parentPath)
+          .querySelector(":scope > .group-section-body");
+        if (parentBody) {
+          parentBody.appendChild(sectionEl);
+          return;
+        }
+      }
+      container.appendChild(sectionEl);
+    });
 
     refreshDescriptionOverflowButtons();
   }
@@ -2303,7 +2253,6 @@
       const subtreeTasks = state.tasks.filter((t) =>
         isSameOrSubgroup(t.group || "Công việc", grpName)
       );
-      const doneInSubtree = subtreeTasks.filter((t) => t.status === "done").length;
       const childSubfolders = state.groups.filter(
         (g) => g !== grpName && isSameOrSubgroup(g, grpName)
       );
@@ -2329,9 +2278,9 @@
       const countBadge = document.createElement("span");
       countBadge.className = "group-crud-count";
       if (childSubfolders.length > 0) {
-        countBadge.textContent = `${directTasks.length} việc trực tiếp • Tổng nhánh ${subtreeTasks.length} việc (${doneInSubtree} xong) • ${childSubfolders.length} thư mục con`;
+        countBadge.textContent = `${directTasks.length} việc trực tiếp • Tổng nhánh ${subtreeTasks.length} việc • ${childSubfolders.length} thư mục con`;
       } else {
-        countBadge.textContent = `${ subtreeTasks.length } công việc (${doneInSubtree} xong)`;
+        countBadge.textContent = `${subtreeTasks.length} công việc`;
       }
       infoWrap.appendChild(countBadge);
 
@@ -2801,7 +2750,7 @@
 
     const prevGroups = state.groups.slice();
     const prevTasks = state.tasks.map((t) => Object.assign({}, t));
-    const prevSelectedFilter = state.selectedGroupFilter;
+    const prevExpandedCategoryGroups = new Set(state.expandedCategoryGroups);
     const prevSyncMeta = Object.assign({}, state.syncMeta);
 
     const mappedGroups = state.groups.map((g) => {
@@ -2828,14 +2777,17 @@
       }
     });
 
-    if (state.selectedGroupFilter === oldName) {
-      state.selectedGroupFilter = newName;
-    } else if (
-      state.selectedGroupFilter !== "ALL" &&
-      state.selectedGroupFilter.startsWith(oldName + "/")
-    ) {
-      state.selectedGroupFilter = newName + state.selectedGroupFilter.slice(oldName.length);
-    }
+    const nextExpanded = new Set();
+    state.expandedCategoryGroups.forEach((key) => {
+      if (key === oldName) {
+        nextExpanded.add(newName);
+      } else if (key.startsWith(oldName + "/")) {
+        nextExpanded.add(newName + key.slice(oldName.length));
+      } else {
+        nextExpanded.add(key);
+      }
+    });
+    state.expandedCategoryGroups = nextExpanded;
 
     markWorkingTreeDirty();
 
@@ -2850,7 +2802,7 @@
     } catch (err) {
       state.groups = prevGroups;
       state.tasks = prevTasks;
-      state.selectedGroupFilter = prevSelectedFilter;
+      state.expandedCategoryGroups = prevExpandedCategoryGroups;
       state.syncMeta = prevSyncMeta;
       renderAll();
       showBanner(err.message || "Không thể đổi tên nhóm.", "error");
@@ -2889,7 +2841,7 @@
 
     const prevGroups = state.groups.slice();
     const prevTasks = state.tasks.map((t) => Object.assign({}, t));
-    const prevSelectedFilter = state.selectedGroupFilter;
+    const prevExpandedCategoryGroups = new Set(state.expandedCategoryGroups);
     const prevSyncMeta = Object.assign({}, state.syncMeta);
 
     state.groups = remainingGroups;
@@ -2929,12 +2881,11 @@
       }
     }
 
-    if (
-      state.selectedGroupFilter !== "ALL" &&
-      isSameOrSubgroup(state.selectedGroupFilter, grpName)
-    ) {
-      state.selectedGroupFilter = "ALL";
-    }
+    Array.from(state.expandedCategoryGroups).forEach((key) => {
+      if (isSameOrSubgroup(key, grpName)) {
+        state.expandedCategoryGroups.delete(key);
+      }
+    });
 
     markWorkingTreeDirty();
 
@@ -2955,7 +2906,7 @@
     } catch (err) {
       state.groups = prevGroups;
       state.tasks = prevTasks;
-      state.selectedGroupFilter = prevSelectedFilter;
+      state.expandedCategoryGroups = prevExpandedCategoryGroups;
       state.syncMeta = prevSyncMeta;
       renderAll();
       showBanner(err.message || "Không thể xóa nhóm.", "error");
@@ -3067,17 +3018,7 @@
         if (state.statusFilter === "done") {
           state.statusFilter = "todo";
         }
-        if (state.selectedGroupFilter !== "ALL" && state.selectedGroupFilter !== group) {
-          state.selectedGroupFilter = "ALL";
-        }
-        if (state.selectedPriorityFilters.size > 0 && !state.selectedPriorityFilters.has(priority)) {
-          state.selectedPriorityFilters.clear();
-        }
       }
-
-      state.collapsedCategoryGroups.delete(group);
-      state.collapsedPriorityGroups.delete(priority);
-      state.collapsedPriorityGroups.delete(`${group}::${priority}`);
 
       markWorkingTreeDirty();
       await persistAllToStorage();
@@ -3143,15 +3084,15 @@
       if (task.status === "done") {
         if (state.statusFilter === "todo") {
           showBanner("Đã đánh dấu Đã xong!", "info", {
-            label: "Xem Tất cả / Đã xong",
+            label: "Xem Đã xong",
             onClick: () => {
-              state.statusFilter = "all";
+              state.statusFilter = "done";
               renderAll();
               hideBanner();
             }
           });
         } else {
-          showBanner("Đã đánh dấu Đã xong (tự động chuyển xuống cuối danh sách).", "info");
+          showBanner("Đã đánh dấu Đã xong.", "info");
         }
       } else {
         showBanner("Đã chuyển công việc về trạng thái Chưa làm.", "info");
@@ -4551,6 +4492,206 @@
     fallbackOpen();
   }
 
+  function getExtensionInstallCommand() {
+    const extId =
+      typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id
+        ? chrome.runtime.id
+        : "";
+    return extId ? `./scripts/install-updater.sh ${extId}` : "./scripts/install-updater.sh";
+  }
+
+  function callNativeUpdater(action, options) {
+    const opts = options || {};
+    return new Promise((resolve) => {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage(
+          {
+            type: "NATIVE_UPDATER",
+            action,
+            skipAutoReload: Boolean(opts.skipAutoReload)
+          },
+          (resp) => {
+            const err = chrome.runtime && chrome.runtime.lastError;
+            if (!err && resp) {
+              resolve(resp);
+              return;
+            }
+            if (typeof chrome.runtime.sendNativeMessage === "function") {
+              chrome.runtime.sendNativeMessage("com.gittask.updater", { action }, (nativeResp) => {
+                const nativeErr = chrome.runtime && chrome.runtime.lastError;
+                if (nativeErr || !nativeResp) {
+                  resolve({
+                    ok: false,
+                    nativeHostMissing: true,
+                    error:
+                      (nativeErr && nativeErr.message) ||
+                      "Không thể kết nối tới Native Messaging Host."
+                  });
+                  return;
+                }
+                resolve(nativeResp);
+              });
+              return;
+            }
+            resolve({
+              ok: false,
+              nativeHostMissing: true,
+              error: (err && err.message) || "Không thể kết nối tới background worker."
+            });
+          }
+        );
+        return;
+      }
+      resolve({
+        ok: false,
+        nativeHostMissing: true,
+        error: "API chrome.runtime không khả dụng."
+      });
+    });
+  }
+
+  function setUpdaterButtonsDisabled(disabled) {
+    state.isUpdatingExt = Boolean(disabled);
+    const headerBtn = document.getElementById("btnUpdateExtension");
+    const settingsBtn = document.getElementById("btnSettingsUpdateExt");
+    const checkBtn = document.getElementById("btnCheckUpdaterStatus");
+    if (headerBtn) {
+      headerBtn.disabled = state.isUpdatingExt;
+      headerBtn.classList.toggle("updating", state.isUpdatingExt);
+    }
+    if (settingsBtn) settingsBtn.disabled = state.isUpdatingExt;
+    if (checkBtn) checkBtn.disabled = state.isUpdatingExt;
+  }
+
+  async function refreshUpdaterStatusUI() {
+    const cmdEl = document.getElementById("updaterInstallCmdText");
+    const badgeEl = document.getElementById("updaterHostStatusBadge");
+    if (cmdEl) {
+      cmdEl.textContent = getExtensionInstallCommand();
+    }
+    if (!badgeEl) return null;
+
+    badgeEl.className = "updater-status-pill";
+    badgeEl.textContent = "Đang kiểm tra...";
+
+    const resp = await callNativeUpdater("ping");
+    if (resp && resp.ok) {
+      const dirtySuffix = resp.dirty ? " • có thay đổi chưa commit" : "";
+      badgeEl.className = "updater-status-pill ready";
+      badgeEl.textContent = `✓ Đã kết nối (${resp.branch || "main"} @ ${resp.commit || "HEAD"}${dirtySuffix})`;
+    } else if (resp && resp.nativeHostMissing) {
+      badgeEl.className = "updater-status-pill missing";
+      badgeEl.textContent = "⚠️ Chưa cài Native Host";
+    } else {
+      badgeEl.className = "updater-status-pill missing";
+      badgeEl.textContent = "⚠️ Lỗi kiểm tra repo";
+    }
+    return resp;
+  }
+
+  async function handleUpdateExtensionCode() {
+    if (state.isSyncing || state.isUpdatingExt) return;
+    const cmdEl = document.getElementById("updaterInstallCmdText");
+    if (cmdEl) {
+      cmdEl.textContent = getExtensionInstallCommand();
+    }
+
+    setUpdaterButtonsDisabled(true);
+    try {
+      showBanner("🔄 Đang kéo mã nguồn mới từ Git (git pull --ff-only)...", "info", {
+        autoHideMs: 15000
+      });
+      const resp = await callNativeUpdater("git_pull");
+
+      if (resp && resp.nativeHostMissing) {
+        const badgeEl = document.getElementById("updaterHostStatusBadge");
+        if (badgeEl) {
+          badgeEl.className = "updater-status-pill missing";
+          badgeEl.textContent = "⚠️ Chưa cài Native Host";
+        }
+        switchTab("settings");
+        showBanner(
+          "Chưa đăng ký Native Host. Hãy chạy lệnh cài đặt 1 lần trong tab GitHub & Bảo mật!",
+          "info",
+          { autoHideMs: 5000 }
+        );
+        return;
+      }
+
+      if (!resp || !resp.ok) {
+        const errText =
+          (resp && (resp.details || resp.error)) ||
+          "Không thể kéo mã nguồn mới bằng git pull.";
+        showBanner(errText, "error", { autoHideMs: 5000 });
+        return;
+      }
+
+      const badgeEl = document.getElementById("updaterHostStatusBadge");
+      if (badgeEl) {
+        badgeEl.className = "updater-status-pill ready";
+        badgeEl.textContent = `✓ Đã kết nối (${resp.branch || "main"} @ ${resp.afterCommit || "HEAD"})`;
+      }
+
+      if (!resp.updated) {
+        showBanner(
+          `✓ Extension đang ở bản mới nhất (${resp.branch || "main"} @ ${resp.afterCommit || "HEAD"})!`,
+          "success",
+          {
+            label: "↻ Nạp lại",
+            onClick: () => {
+              if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "RELOAD_EXTENSION" });
+              } else if (
+                typeof chrome !== "undefined" &&
+                chrome.runtime &&
+                typeof chrome.runtime.reload === "function"
+              ) {
+                chrome.runtime.reload();
+              }
+            }
+          }
+        );
+        return;
+      }
+
+      showBanner(
+        `🎉 Đã kéo code mới (${resp.beforeCommit} → ${resp.afterCommit})! Đang tự động nạp lại...`,
+        "success",
+        { autoHideMs: 5000 }
+      );
+    } finally {
+      setUpdaterButtonsDisabled(false);
+    }
+  }
+
+  async function checkLastExtUpdateNotice() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
+      return;
+    }
+    try {
+      const stored = await ChromeStorage.get(["lastExtUpdateNotice"]);
+      const notice = stored && stored.lastExtUpdateNotice;
+      if (!notice || typeof notice !== "object") return;
+      if (typeof chrome.storage.local.remove === "function") {
+        chrome.storage.local.remove(["lastExtUpdateNotice"], () => {
+          void (chrome.runtime && chrome.runtime.lastError);
+        });
+      } else {
+        await ChromeStorage.set({ lastExtUpdateNotice: null });
+      }
+      const ageMs = Date.now() - Number(notice.at || 0);
+      if (ageMs >= 0 && ageMs <= 5 * 60 * 1000 && notice.fromCommit && notice.toCommit) {
+        showBanner(
+          `✅ Đã cập nhật Extension thành công (${notice.fromCommit} → ${notice.toCommit})!`,
+          "success",
+          { autoHideMs: 4500 }
+        );
+      }
+    } catch (_) {
+      // Bỏ qua lỗi đọc thông báo cập nhật gần nhất
+    }
+  }
+
   function bindAllEvents() {
     const params = new URLSearchParams(window.location.search);
     const currentMode = params.get("mode");
@@ -4594,6 +4735,44 @@
       }
     });
 
+    const btnUpdateExt = document.getElementById("btnUpdateExtension");
+    if (btnUpdateExt) {
+      btnUpdateExt.addEventListener("click", () => {
+        handleUpdateExtensionCode();
+      });
+    }
+
+    const btnSettingsUpdateExt = document.getElementById("btnSettingsUpdateExt");
+    if (btnSettingsUpdateExt) {
+      btnSettingsUpdateExt.addEventListener("click", () => {
+        handleUpdateExtensionCode();
+      });
+    }
+
+    const btnCheckUpdaterStatus = document.getElementById("btnCheckUpdaterStatus");
+    if (btnCheckUpdaterStatus) {
+      btnCheckUpdaterStatus.addEventListener("click", () => {
+        refreshUpdaterStatusUI();
+      });
+    }
+
+    const btnCopyUpdaterCmd = document.getElementById("btnCopyUpdaterCmd");
+    if (btnCopyUpdaterCmd) {
+      btnCopyUpdaterCmd.addEventListener("click", async () => {
+        const cmd = getExtensionInstallCommand();
+        try {
+          await fallbackCopyPlainText(cmd);
+          btnCopyUpdaterCmd.textContent = "✓ Đã copy";
+          showBanner("📋 Đã sao chép lệnh cài đặt Native Updater!", "success");
+          setTimeout(() => {
+            btnCopyUpdaterCmd.textContent = "📋 Copy lệnh";
+          }, 1800);
+        } catch (err) {
+          showBanner(err.message || "Không thể sao chép lệnh cài đặt.", "error");
+        }
+      });
+    }
+
     document.getElementById("tabBtnTasks").addEventListener("click", () => switchTab("tasks"));
     document.getElementById("tabBtnAddTask").addEventListener("click", () => {
       switchTab("add");
@@ -4609,28 +4788,16 @@
         switchTab("groups");
       });
     }
-    document
-      .getElementById("tabBtnSettings")
-      .addEventListener("click", () => switchTab("settings"));
+    document.getElementById("tabBtnSettings").addEventListener("click", () => {
+      switchTab("settings");
+      refreshUpdaterStatusUI();
+    });
 
     document.getElementById("btnQuickGoAdd").addEventListener("click", () => {
       resetTaskForm();
       switchTab("add");
       document.getElementById("taskTitleInput").focus();
     });
-
-    const btnQuickGroups = document.getElementById("btnQuickManageGroups");
-    if (btnQuickGroups) {
-      btnQuickGroups.addEventListener("click", () => {
-        state.editingGroupName = null;
-        state.deletingGroupName = null;
-        state.addingSubfolderParent = null;
-        renderGroupCrudList();
-        switchTab("groups");
-        const crudInput = document.getElementById("crudNewGroupInput");
-        if (crudInput) crudInput.focus();
-      });
-    }
 
     const groupCrudAddForm = document.getElementById("groupCrudAddForm");
     if (groupCrudAddForm) {
@@ -4774,44 +4941,35 @@
 
     document.querySelectorAll(".status-seg-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
-        state.statusFilter = btn.getAttribute("data-statusfilter") || "todo";
+        const nextStatus = btn.getAttribute("data-statusfilter");
+        state.statusFilter = nextStatus === "done" ? "done" : "todo";
         renderAll();
       });
     });
 
     document.getElementById("statusFilterSelect").addEventListener("change", (ev) => {
-      state.statusFilter = ev.target.value || "todo";
+      state.statusFilter = ev.target.value === "done" ? "done" : "todo";
       renderAll();
     });
 
-    const btnTogglePrio = document.getElementById("btnTogglePriorityGroup");
-    if (btnTogglePrio) {
-      btnTogglePrio.addEventListener("click", async () => {
-        const prevPrioGroup = state.groupByPriority;
-        state.groupByPriority = !state.groupByPriority;
-        try {
-          await persistAllToStorage();
-          renderAll();
-        } catch (err) {
-          state.groupByPriority = prevPrioGroup;
-          renderAll();
-          showBanner(err.message || "Không thể lưu tùy chọn nhóm Priority.", "error");
-        }
+    const clearDateInput = document.getElementById("clearDoneDateInput");
+    if (clearDateInput) {
+      clearDateInput.addEventListener("change", (ev) => {
+        state.clearDoneCutoffDate = ev.target.value || "";
+        renderDoneClearBar();
+      });
+      clearDateInput.addEventListener("input", (ev) => {
+        state.clearDoneCutoffDate = ev.target.value || "";
+        renderDoneClearBar();
       });
     }
 
-    document.getElementById("btnToggleGroupBy").addEventListener("click", async () => {
-      const prevGroupBy = state.groupByCategory;
-      state.groupByCategory = !state.groupByCategory;
-      try {
-        await persistAllToStorage();
-        renderAll();
-      } catch (err) {
-        state.groupByCategory = prevGroupBy;
-        renderAll();
-        showBanner(err.message || "Không thể lưu tùy chọn gom nhóm.", "error");
-      }
-    });
+    const btnClearDone = document.getElementById("btnClearDoneTasks");
+    if (btnClearDone) {
+      btnClearDone.addEventListener("click", () => {
+        handleClearDoneTasks();
+      });
+    }
 
     window.addEventListener("resize", () => {
       refreshDescriptionOverflowButtons();
@@ -4896,9 +5054,14 @@
     try {
       await loadFromStorage();
       populateSettingsFormFromState();
+      const cmdEl = document.getElementById("updaterInstallCmdText");
+      if (cmdEl) {
+        cmdEl.textContent = getExtensionInstallCommand();
+      }
       bindAllEvents();
       renderAll();
       scheduleOrCancelAutoPush();
+      await checkLastExtUpdateNotice();
     } catch (err) {
       showBanner(err.message || "Không thể khởi tạo dữ liệu ứng dụng.", "error");
     }

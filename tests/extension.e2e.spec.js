@@ -1,4 +1,5 @@
 const { test, expect, chromium } = require("@playwright/test");
+const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -103,9 +104,21 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.setViewportSize({ width: 800, height: 600 });
 
     await expect(page.locator("#segBtnTodo")).toHaveClass(/active/);
-    await expect(page.locator("#btnTogglePriorityGroup")).toContainText("Nhóm Priority: BẬT");
-    await expect(page.locator("#btnToggleGroupBy")).toContainText("Nhóm Group: BẬT");
-    await expect(page.locator(".empty-state-box")).toBeVisible();
+    await expect(page.locator("#segBtnAll")).toHaveCount(0);
+    await expect(page.locator("#btnTogglePriorityGroup")).toHaveCount(0);
+    await expect(page.locator("#btnToggleGroupBy")).toHaveCount(0);
+    await expect(page.locator("#priorityFilterBar")).toHaveCount(0);
+    await expect(page.locator("#groupFilterBar")).toHaveCount(0);
+
+    // Mặc định các folder đều hiển thị và thu gọn (collapsed) trên màn danh sách
+    await expect(page.locator(".group-section")).toHaveCount(4);
+    await expect(page.locator('.group-section[data-group-name="Công việc"] .group-header')).toHaveAttribute(
+      "aria-expanded",
+      "false"
+    );
+    await expect(page.locator('.group-section[data-group-name="Công việc"] .group-task-count')).toHaveText(
+      "0 công việc"
+    );
 
     // Tạo nhóm mới bằng phím Enter trong ô nhập nhóm (không làm submit nhầm form chính)
     await page.click("#tabBtnAddTask");
@@ -130,7 +143,13 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.click("#btnSubmitTask");
 
     await expect(page.locator("#viewTasks")).toHaveClass(/active/);
-    const firstCard = page.locator(".task-card").first();
+    const sprintSection = page.locator('.group-section[data-group-name="Sprint Alpha"]');
+    await expect(sprintSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(sprintSection.locator(".group-task-count")).toHaveText("1 công việc");
+    await sprintSection.locator(".group-header").click();
+    await expect(sprintSection.locator(".group-header")).toHaveAttribute("aria-expanded", "true");
+
+    const firstCard = sprintSection.locator(".task-card").first();
     await expect(firstCard.locator(".task-title")).toHaveText("Thiết kế API đồng bộ GitHub 🚀");
     await expect(firstCard.locator(".badge-group")).toHaveText("Sprint Alpha");
     await expect(firstCard.locator(".badge-prio-high")).toContainText("High");
@@ -159,7 +178,9 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     await expect(page.locator("#navTaskCount")).toHaveText("3");
 
-    // Kiểm tra Sửa (Update)
+    // Mở rộng nhóm "Cá nhân" để sửa Task 2
+    const personalSection = page.locator('.group-section[data-group-name="Cá nhân"]');
+    await personalSection.locator(".group-header").click();
     const editCard = page.locator(".task-card", { hasText: "Đọc tài liệu Manifest V3 Security" });
     await editCard.locator(".btn-edit-task").click();
     await page.fill("#taskTitleInput", "Rà soát Manifest V3 CSP & Permissions");
@@ -200,15 +221,18 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     await page.reload();
     await expect(page.locator("#navTaskCount")).toHaveText("2");
+    await expect(
+      page.locator('.group-section[data-group-name="Sprint Alpha"] .group-header')
+    ).toHaveAttribute("aria-expanded", "false");
     assertCleanConsole();
   });
 
-  test("2. Đổi trạng thái Chưa làm <-> Đã xong, Sắp xếp Done xuống cuối, Gom nhóm, Tìm kiếm & Theme", async () => {
+  test("2. Đổi trạng thái Chưa làm <-> Đã xong, Sắp xếp theo Priority trong Folder, Tìm kiếm & Theme", async () => {
     const { page, assertCleanConsole } = await openExtensionPopupPage();
 
     const seedTasks = [
-      { title: "Task Nhóm A - Ưu tiên Cao", group: "Công việc", priority: "high" },
       { title: "Task Nhóm A - Ưu tiên Thấp", group: "Công việc", priority: "low" },
+      { title: "Task Nhóm A - Ưu tiên Cao", group: "Công việc", priority: "high" },
       { title: "Task Nhóm B - Dự án GitHub", group: "Dự án GitHub", priority: "medium" }
     ];
 
@@ -220,54 +244,38 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       await page.click("#btnSubmitTask");
     }
 
-    // Kiểm tra mặc định cả Nhóm Group: BẬT & Nhóm Priority: BẬT theo phân cấp Nhóm -> Priority
-    await expect(page.locator(".group-section")).toHaveCount(2);
-    await expect(page.locator(".priority-section")).toHaveCount(3);
-    await expect(
-      page.locator('.group-section[data-group-name="Công việc"] .priority-section')
-    ).toHaveCount(2);
-
-    // Tắt Nhóm Priority để kiểm tra gom thuần theo Group
-    await page.click("#btnTogglePriorityGroup");
+    // Chỉ gom theo Folder (không còn priority-section bên trong), mặc định thu gọn
+    await expect(page.locator(".group-section")).toHaveCount(4);
     await expect(page.locator(".priority-section")).toHaveCount(0);
-    await expect(page.locator(".group-section")).toHaveCount(2);
-    await expect(
-      page.locator('.group-section[data-group-name="Công việc"] .task-card')
-    ).toHaveCount(2);
+
+    const workSection = page.locator('.group-section[data-group-name="Công việc"]');
+    await workSection.locator(".group-header").click();
+    const workTitles = await workSection
+      .locator(".task-card .task-title")
+      .allTextContents();
+    expect(workTitles).toEqual(["Task Nhóm A - Ưu tiên Cao", "Task Nhóm A - Ưu tiên Thấp"]);
 
     // Kiểm tra tìm kiếm từ khóa
     await page.fill("#searchTaskInput", "Dự án GitHub");
+    await expect(page.locator(".group-section")).toHaveCount(1);
     await expect(page.locator(".task-card")).toHaveCount(1);
     await page.fill("#searchTaskInput", "");
+    await expect(page.locator(".group-section")).toHaveCount(4);
     await expect(page.locator(".task-card")).toHaveCount(3);
 
-    // Kiểm tra lọc theo nhóm rồi quay lại Tất cả nhóm
-    await page.locator('#groupFilterBar .filter-pill[data-group="Công việc"]').click();
-    await expect(page.locator(".task-card")).toHaveCount(2);
-    await page.locator('#groupFilterBar .filter-pill[data-group="ALL"]').click();
-
-    // Chuyển sang xem "Tất cả" để kiểm chứng Done tự động chuyển xuống cuối nhóm
-    await page.click("#segBtnAll");
+    // Đánh dấu hoàn thành -> chuyển sang tab Đã xong -> bỏ đánh dấu quay lại Chưa làm
     const highTaskCard = page.locator(".task-card", { hasText: "Task Nhóm A - Ưu tiên Cao" });
-    await highTaskCard.locator(".task-checkbox").check();
+    await highTaskCard.locator(".task-checkbox").click();
 
     await expect(page.locator("#countTodoBadge")).toHaveText("2");
     await expect(page.locator("#countDoneBadge")).toHaveText("1");
-    const groupACards = page.locator('.group-section[data-group-name="Công việc"] .task-card');
-    await expect(groupACards.first().locator(".task-title")).toHaveText("Task Nhóm A - Ưu tiên Thấp");
-    await expect(groupACards.last()).toHaveClass(/done/);
 
-    // Tắt cả Nhóm Group -> danh sách phẳng hoàn toàn, Done xếp cuối
-    await page.click("#btnToggleGroupBy");
-    await expect(page.locator(".group-section")).toHaveCount(0);
-    await expect(page.locator(".task-card").last()).toHaveClass(/done/);
-
-    // Bật lại cả Nhóm Priority & Nhóm Group, đổi ngược từ Đã xong -> Chưa làm
-    await page.click("#btnTogglePriorityGroup");
-    await page.click("#btnToggleGroupBy");
     await page.click("#segBtnDone");
+    await expect(page.locator(".group-section")).toHaveCount(1);
     await expect(page.locator(".task-card")).toHaveCount(1);
-    await page.locator(".task-card .task-checkbox").click();
+    await expect(workSection.locator(".group-header")).toHaveAttribute("aria-expanded", "true");
+    await expect(workSection.locator(".task-card")).toHaveClass(/done/);
+    await workSection.locator(".task-card .task-checkbox").click();
     await expect(page.locator("#countDoneBadge")).toHaveText("0");
     await expect(page.locator("#countTodoBadge")).toHaveText("3");
 
@@ -538,7 +546,8 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await expect(page.locator(".group-section").last().locator(".group-header")).toContainText("<b>Nhóm XSS</b>");
     await expect(page.locator(".task-img-thumb")).toHaveCount(0);
 
-    // Xóa 1 trong 2 task từng bị trùng ID -> chỉ xóa đúng 1 task nhờ deduplicate ID
+    // Mở rộng nhóm "Công việc" rồi xóa 1 trong 2 task từng bị trùng ID -> chỉ xóa đúng 1 task nhờ deduplicate ID
+    await page.locator('.group-section[data-group-name="Công việc"] .group-header').click();
     await page.locator(".task-card", { hasText: "Task trùng ID" }).locator(".btn-delete-task").click();
     await expect(page.locator(".task-card")).toHaveCount(1);
 
@@ -702,9 +711,31 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     assertCleanConsole();
   });
 
-  test("6. Kiểm thử chuyên sâu 5 yêu cầu mới: Mặc định Không ưu tiên & 4 màu cờ, Ẩn mô tả mặc định, Rút gọn mô tả dài, Chia nhóm & Ẩn/Hiện Priority/Group", async () => {
+  test("6. Kiểm thử các yêu cầu giao diện & nút thêm ở Folder, mặc định thu gọn Folder, bỏ filter/group thừa, rút gọn mô tả & 4 màu cờ", async () => {
     const { page, assertCleanConsole } = await openExtensionPopupPage();
     await page.setViewportSize({ width: 800, height: 600 });
+
+    // Kiểm tra đã bỏ hoàn toàn filter theo folder, option group theo nhóm/priority, filter priority và tab Tất cả
+    await expect(page.locator("#segBtnAll")).toHaveCount(0);
+    await expect(page.locator("#segBtnTodo")).toBeVisible();
+    await expect(page.locator("#segBtnDone")).toBeVisible();
+    await expect(page.locator("#groupFilterBar")).toHaveCount(0);
+    await expect(page.locator("#priorityFilterBar")).toHaveCount(0);
+    await expect(page.locator("#btnToggleGroupBy")).toHaveCount(0);
+    await expect(page.locator("#btnTogglePriorityGroup")).toHaveCount(0);
+    await expect(page.locator("#btnQuickManageGroups")).toHaveCount(0);
+
+    // Kiểm tra nút "➕ Thêm" trực tiếp trên từng Folder (kể cả Folder trống) và mặc định thu gọn Folder
+    const urgentSection = page.locator('.group-section[data-group-name="Khẩn cấp"]');
+    await expect(urgentSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(urgentSection.locator(".group-task-count")).toHaveText("0 công việc");
+    await expect(urgentSection.locator(".group-header")).not.toContainText("Hoàn thành");
+    await urgentSection.locator(".btn-folder-add-task").click();
+    await expect(page.locator("#viewAddTask")).toHaveClass(/active/);
+    await expect(page.locator("#taskGroupSelect")).toHaveValue("Khẩn cấp");
+    // Bấm nút Thêm trong Folder không làm mở Folder đó ở màn list
+    await page.click("#btnCancelEdit");
+    await expect(urgentSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
 
     const longMultilineDesc = [
       "Dòng 1: Kiểm tra luồng xác thực Fine-grained PAT với GitHub REST Contents API.",
@@ -714,22 +745,30 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       "Dòng 5: Mặc định khi mới tạo hoặc tải danh sách thì vùng mô tả luôn ở trạng thái ẩn."
     ].join("\n");
 
-    // 1) Tạo task KHÔNG chọn cờ ưu tiên -> mặc định phải là "none" (Không ưu tiên) + mô tả dài mặc định ẩn
-    await page.click("#btnQuickGoAdd");
+    // 1) Dùng nút "➕ Thêm" trên folder "Công việc" -> tạo task KHÔNG chọn cờ ưu tiên (mặc định "none") + mô tả dài mặc định ẩn
+    const workGroupSection = page.locator('.group-section[data-group-name="Công việc"]');
+    await workGroupSection.locator(".btn-folder-add-task").click();
+    await expect(page.locator("#taskGroupSelect")).toHaveValue("Công việc");
     await expect(page.locator("#taskPrioritySelect")).toHaveValue("none");
     await page.fill("#taskTitleInput", "Task Mặc Định Không Ưu Tiên");
     await page.fill("#taskDescInput", longMultilineDesc);
     await page.click("#btnSubmitTask");
 
+    // Mặc định folder vẫn thu gọn -> click mở rộng "Công việc"
+    await expect(workGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(workGroupSection.locator(".group-task-count")).toHaveText("1 công việc");
+    await workGroupSection.locator(".group-header").click();
+    await expect(workGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "true");
+
     const defaultCard = page.locator(".task-card", { hasText: "Task Mặc Định Không Ưu Tiên" });
     await expect(defaultCard).toHaveAttribute("data-priority", "none");
     await expect(defaultCard.locator(".badge-prio-none")).toContainText("Không ưu tiên");
 
-    // Yêu cầu 5: Mặc định là ẩn mô tả ở danh sách list
+    // Mặc định là ẩn mô tả ở danh sách list
     const descBox = defaultCard.locator(".task-desc-box");
     await expect(descBox).toBeHidden();
 
-    // Yêu cầu 1: Mở mô tả dài -> bị rút gọn 2 dòng (scrollHeight > clientHeight) kèm nút "Xem thêm ▾"
+    // Mở mô tả dài -> bị rút gọn 2 dòng (scrollHeight > clientHeight) kèm nút "Xem thêm ▾"
     await defaultCard.locator(".btn-toggle-desc").click();
     await expect(descBox).toBeVisible();
     const expandBtn = defaultCard.locator(".btn-expand-desc");
@@ -766,9 +805,9 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       { title: "Task Dự Án GitHub - Cao", group: "Dự án GitHub", priority: "high" }
     ];
     for (const item of extraTasks) {
-      await page.click("#btnQuickGoAdd");
+      await page.locator(`.group-section[data-group-name="${item.group}"] .btn-folder-add-task`).click();
+      await expect(page.locator("#taskGroupSelect")).toHaveValue(item.group);
       await page.fill("#taskTitleInput", item.title);
-      await page.selectOption("#taskGroupSelect", item.group);
       await page.selectOption("#taskPrioritySelect", item.priority);
       await page.click("#btnSubmitTask");
     }
@@ -797,64 +836,35 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     expect(new Set(badgeColors.map((b) => b.textColor)).size).toBe(4);
     expect(new Set(badgeColors.map((b) => b.flagColor)).size).toBe(4);
 
-    // 3) Yêu cầu 3 & Yêu cầu 6: Phân cấp bắt buộc phải là Nhóm (Group) ngoài -> Priority bên trong (High -> Medium -> Low -> None)
-    await expect(page.locator("#taskListContainer > .group-section")).toHaveCount(2);
-    await expect(page.locator(".priority-section .group-section")).toHaveCount(0);
-    await expect(page.locator(".group-section > .group-section-body > .priority-section")).toHaveCount(5);
+    // 3) Không còn thanh chia nhóm Priority con bên trong Folder; các task bên trong vẫn xếp theo High -> Medium -> Low -> None
+    await expect(page.locator(".priority-section")).toHaveCount(0);
+    await expect(workGroupSection.locator(".group-task-count")).toHaveText("4 công việc");
+    await expect(workGroupSection.locator(".group-header")).not.toContainText("Hoàn thành");
 
-    const renderedGroupOrder = await page
-      .locator("#taskListContainer > .group-section")
-      .evaluateAll((els) => els.map((el) => el.getAttribute("data-group-name")));
-    expect(renderedGroupOrder).toEqual(["Công việc", "Dự án GitHub"]);
+    const renderedTitlesInWorkGroup = await workGroupSection
+      .locator(".task-card .task-title")
+      .allTextContents();
+    expect(renderedTitlesInWorkGroup).toEqual([
+      "Task Cờ Cao",
+      "Task Cờ Trung Bình",
+      "Task Cờ Thấp",
+      "Task Mặc Định Không Ưu Tiên"
+    ]);
 
-    const workGroupSection = page.locator('.group-section[data-group-name="Công việc"]');
-    const renderedPrioInsideWorkGroup = await workGroupSection
-      .locator(".priority-section")
-      .evaluateAll((els) => els.map((el) => el.getAttribute("data-priority-group")));
-    expect(renderedPrioInsideWorkGroup).toEqual(["high", "medium", "low", "none"]);
+    // 4) Đóng / mở từng Folder độc lập & mặc định thu gọn lại sau reload
+    const githubGroupSection = page.locator('.group-section[data-group-name="Dự án GitHub"]');
+    await expect(githubGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(githubGroupSection.locator(".group-section-body")).toBeHidden();
+    await githubGroupSection.locator(".group-header").click();
+    await expect(githubGroupSection.locator(".group-section-body")).toBeVisible();
 
-    // 4) Yêu cầu 4: Cho phép ẩn / hiển thị từng nhóm Group bên ngoài và từng nhóm Priority bên trong
-    await expect(workGroupSection.locator(".group-section-body")).toBeVisible();
     await workGroupSection.locator(".group-header").click();
     await expect(workGroupSection.locator(".group-section-body")).toBeHidden();
     await expect(workGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
-    await workGroupSection.locator(".group-header").click();
-    await expect(workGroupSection.locator(".group-section-body")).toBeVisible();
-    await expect(workGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "true");
-
-    const highSectionInWork = workGroupSection.locator('.priority-section[data-priority-group="high"]');
-    await expect(highSectionInWork.locator(".priority-section-body")).toBeVisible();
-    await highSectionInWork.locator(".priority-header").click();
-    await expect(highSectionInWork.locator(".priority-section-body")).toBeHidden();
-    await expect(highSectionInWork.locator(".priority-header")).toHaveAttribute("aria-expanded", "false");
-    // Nhóm Priority "high" ở nhóm "Dự án GitHub" không bị ảnh hưởng khi đóng "high" ở nhóm "Công việc"
-    await expect(
-      page
-        .locator('.group-section[data-group-name="Dự án GitHub"] .priority-section[data-priority-group="high"] .priority-section-body')
-    ).toBeVisible();
-    await highSectionInWork.locator(".priority-header").click();
-    await expect(highSectionInWork.locator(".priority-section-body")).toBeVisible();
-
-    // Lọc nhanh theo cờ trên thanh Priority Filter Bar
-    await page.locator('#priorityFilterBar .filter-pill[data-priority="none"]').click();
-    await expect(page.locator(".task-card")).toHaveCount(1);
-    await expect(page.locator(".task-card .task-title")).toHaveText("Task Mặc Định Không Ưu Tiên");
-    await page.locator('#priorityFilterBar .filter-pill[data-priority="ALL"]').click();
-    await expect(page.locator(".task-card")).toHaveCount(5);
-
-    // Bật / tắt nút Nhóm Group và Nhóm Priority trên thanh công cụ & kiểm tra lưu bền vững sau reload
-    await page.click("#btnToggleGroupBy");
-    await expect(page.locator("#btnToggleGroupBy")).toContainText("Nhóm Group: TẮT");
-    await expect(page.locator(".group-section")).toHaveCount(0);
-    await expect(page.locator(".priority-section")).toHaveCount(4);
-
-    await page.click("#btnTogglePriorityGroup");
-    await expect(page.locator("#btnTogglePriorityGroup")).toContainText("Nhóm Priority: TẮT");
-    await expect(page.locator(".priority-section")).toHaveCount(0);
 
     await page.reload();
-    await expect(page.locator("#btnTogglePriorityGroup")).toContainText("Nhóm Priority: TẮT");
-    await expect(page.locator("#btnToggleGroupBy")).toContainText("Nhóm Group: TẮT");
+    await expect(workGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(githubGroupSection.locator(".group-header")).toHaveAttribute("aria-expanded", "false");
 
     assertCleanConsole();
   });
@@ -871,7 +881,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     const manifestJson = JSON.parse(
       fs.readFileSync(path.join(EXTENSION_PATH, "manifest.json"), "utf8")
     );
-    expect(manifestJson.permissions).toEqual(["storage"]);
+    expect(manifestJson.permissions).toEqual(["storage", "nativeMessaging"]);
     expect(manifestJson.host_permissions).toEqual(["https://api.github.com/*"]);
     expect(manifestJson.action.default_popup).toBe("popup.html");
 
@@ -888,8 +898,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await expect(page.locator("#launchModeSelect")).toHaveValue("popup");
 
     // ==================== B. KIỂM THỬ QUẢN LÝ CRUD NHÓM (REQ 7) ====================
-    await page.click("#tabBtnTasks");
-    await page.click("#btnQuickManageGroups");
+    await page.click("#tabBtnGroups");
     await expect(page.locator("#viewGroups")).toHaveClass(/active/);
     await expect(page.locator("#navGroupCount")).toHaveText("4");
 
@@ -923,7 +932,11 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await backendItem.locator(".btn-save-rename-group").click();
 
     await expect(page.locator('.group-crud-item[data-group-item="Core Backend"]')).toBeVisible();
+    await expect(
+      page.locator('.group-crud-item[data-group-item="Core Backend"] .group-crud-count')
+    ).toHaveText("1 công việc");
     await page.click("#tabBtnTasks");
+    await page.locator('.group-section[data-group-name="Core Backend"] .group-header').click();
     await expect(
       page.locator(".task-card", { hasText: "Xây dựng endpoint đồng bộ SHA" }).locator(".badge-group")
     ).toHaveText("Core Backend");
@@ -953,6 +966,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     await expect(page.locator("#navGroupCount")).toHaveText("3");
     await page.click("#tabBtnTasks");
+    await page.locator('.group-section[data-group-name="Dự án GitHub"] .group-header').click();
     await expect(
       page.locator(".task-card", { hasText: "Xây dựng endpoint đồng bộ SHA" }).locator(".badge-group")
     ).toHaveText("Dự án GitHub");
@@ -1043,7 +1057,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     expect(remoteTasks).toHaveLength(1);
 
     // 2) Trường hợp MaxWait tính từ thay đổi đầu tiên:
-    // Đặt Debounce = 4s nhưng MaxWait = 2s (hoặc sửa liên tục mỗi 700ms làm Debounce liên tục bị đẩy lùi)
+    // Đặt Debounce = 3s nhưng MaxWait = 2s (thao tác liên tục mỗi 650ms làm Debounce liên tục bị đẩy lùi)
     // để chứng minh dù thay đổi liên tục không nghỉ, đúng hạn từ thay đổi đầu tiên hệ thống vẫn tự động commit & Push!
     await page.click("#tabBtnSettings");
     await page.fill("#autoPushDebounceValue", "3");
@@ -1053,18 +1067,18 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.click("#btnSavePreferences");
 
     await page.click("#tabBtnTasks");
-    await page.click("#segBtnAll");
 
-    const checkbox = page.locator(".task-card .task-checkbox").first();
     const firstChangeStartedAt = Date.now();
-    await checkbox.click(); // t ~ 0ms (thay đổi đầu tiên: dirty = true)
+    await page.locator(".task-card .task-checkbox").first().click(); // t ~ 0ms (chuyển sang Đã xong)
     await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
 
-    // Tiếp tục thao tác liên tục mỗi 650ms (nếu chỉ có Debounce 3s thì sẽ không bao giờ Push ở mốc ~2s)
+    // Tiếp tục thao tác liên tục mỗi 650ms qua tab Đã xong / Chưa làm (giữ folder Dự án GitHub đang mở)
     await page.waitForTimeout(650);
-    await checkbox.click();
+    await page.click("#segBtnDone");
+    await page.locator(".task-card .task-checkbox").first().click(); // t ~ 650ms (chuyển về Chưa làm)
     await page.waitForTimeout(650);
-    await checkbox.click();
+    await page.click("#segBtnTodo");
+    await page.locator(".task-card .task-checkbox").first().click(); // t ~ 1300ms (chuyển sang Đã xong)
 
     await expect.poll(() => putCount, { timeout: 3500 }).toBe(2);
     const elapsedMs = Date.now() - firstChangeStartedAt;
@@ -1075,113 +1089,123 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     assertCleanConsole();
   });
 
-  test("8. Bộ đếm Cờ/Nhóm theo bộ lọc trạng thái (tích xong giảm số lượng cờ) & Chọn nhiều cờ cùng lúc (Multi-select Priority)", async () => {
+  test("8. Tab Đã xong: Mặc định nút Xóa task quá 30 ngày & Xóa theo mốc ngày tùy chọn", async () => {
     const { page, assertCleanConsole } = await openExtensionPopupPage();
 
-    const seed = [
-      { title: "High Task 1", group: "Công việc", priority: "high" },
-      { title: "High Task 2", group: "Dự án GitHub", priority: "high" },
-      { title: "Medium Task 1", group: "Công việc", priority: "medium" },
-      { title: "Low Task 1", group: "Công việc", priority: "low" },
-      { title: "None Task 1", group: "Cá nhân", priority: "none" }
+    const formatLocalYMD = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+
+    const now = new Date();
+    const daysAgoIso = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    const expectedDefaultCutoff = (() => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 30);
+      return formatLocalYMD(d);
+    })();
+    const threeDaysAgoDateStr = (() => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 3);
+      return formatLocalYMD(d);
+    })();
+
+    const seededTasks = [
+      {
+        id: "done-35d",
+        title: "Việc xong 35 ngày trước",
+        description: "",
+        group: "Công việc",
+        priority: "medium",
+        status: "done",
+        updatedAt: daysAgoIso(35)
+      },
+      {
+        id: "done-31d",
+        title: "Việc xong 31 ngày trước",
+        description: "",
+        group: "Dự án GitHub",
+        priority: "low",
+        status: "done",
+        updatedAt: daysAgoIso(31)
+      },
+      {
+        id: "done-5d",
+        title: "Việc xong 5 ngày trước",
+        description: "",
+        group: "Công việc",
+        priority: "high",
+        status: "done",
+        updatedAt: daysAgoIso(5)
+      },
+      {
+        id: "done-today",
+        title: "Việc vừa xong hôm nay",
+        description: "",
+        group: "Cá nhân",
+        priority: "none",
+        status: "done",
+        updatedAt: daysAgoIso(0)
+      },
+      {
+        id: "todo-40d",
+        title: "Việc chưa làm 40 ngày trước",
+        description: "",
+        group: "Công việc",
+        priority: "high",
+        status: "todo",
+        updatedAt: daysAgoIso(40)
+      }
     ];
 
-    for (const item of seed) {
-      await page.click("#btnQuickGoAdd");
-      await page.fill("#taskTitleInput", item.title);
-      await page.selectOption("#taskGroupSelect", item.group);
-      await page.selectOption("#taskPrioritySelect", item.priority);
-      await page.click("#btnSubmitTask");
-    }
+    await page.evaluate((tasks) => {
+      return new Promise((resolve) => {
+        chrome.storage.local.set({ tasks }, resolve);
+      });
+    }, seededTasks);
 
-    const allPrioPill = page.locator('#priorityFilterBar .filter-pill[data-priority="ALL"]');
-    const highPill = page.locator('#priorityFilterBar .filter-pill[data-priority="high"]');
-    const medPill = page.locator('#priorityFilterBar .filter-pill[data-priority="medium"]');
-    const lowPill = page.locator('#priorityFilterBar .filter-pill[data-priority="low"]');
-    const nonePill = page.locator('#priorityFilterBar .filter-pill[data-priority="none"]');
+    await page.reload();
 
-    // Ban đầu ở "Chưa làm": Tất cả cờ (5), High (2), Medium (1), Low (1), Không ưu tiên (1)
-    await expect(allPrioPill).toHaveClass(/active/);
-    await expect(allPrioPill).toContainText("Tất cả cờ (5)");
-    await expect(highPill).toContainText("High (2)");
-    await expect(medPill).toContainText("Medium (1)");
-    await expect(lowPill).toContainText("Low (1)");
-    await expect(nonePill).toContainText("Không ưu tiên (1)");
+    // Ở tab Chưa làm: thanh dọn dẹp Đã xong bị ẩn, số lượng bộ đếm đúng
+    await expect(page.locator("#doneClearBar")).toBeHidden();
+    await expect(page.locator("#countTodoBadge")).toHaveText("1");
+    await expect(page.locator("#countDoneBadge")).toHaveText("4");
 
-    // Tích hoàn thành 2 task High -> ở mục "Chưa làm", số lượng High giảm về 1 rồi về 0
-    await page.locator(".task-card", { hasText: "High Task 1" }).locator(".task-checkbox").click();
-    await expect(highPill).toContainText("High (1)");
-    await expect(allPrioPill).toContainText("Tất cả cờ (4)");
-    await expect(page.locator('#groupFilterBar .filter-pill[data-group="Công việc"]')).toContainText(
-      "Công việc (2)"
-    );
-
-    await page.locator(".task-card", { hasText: "High Task 2" }).locator(".task-checkbox").click();
-    await expect(highPill).toContainText("High (0)");
-    await expect(allPrioPill).toContainText("Tất cả cờ (3)");
-    await expect(
-      page.locator('#groupFilterBar .filter-pill[data-group="Dự án GitHub"]')
-    ).toContainText("Dự án GitHub (0)");
-
-    // Chuyển sang "Đã xong" -> High hiện (2), các cờ khác hiện (0)
+    // Chuyển sang tab Đã xong: mặc định chọn ngày cách hôm nay 30 ngày & nút Xóa task quá 30 ngày (2)
     await page.click("#segBtnDone");
-    await expect(allPrioPill).toContainText("Tất cả cờ (2)");
-    await expect(highPill).toContainText("High (2)");
-    await expect(medPill).toContainText("Medium (0)");
+    await expect(page.locator("#doneClearBar")).toBeVisible();
+    await expect(page.locator("#clearDoneDateInput")).toHaveValue(expectedDefaultCutoff);
+    await expect(page.locator("#btnClearDoneTasks")).toHaveText("🗑️ Xóa task quá 30 ngày (2)");
+    await expect(page.locator("#btnClearDoneTasks")).toBeEnabled();
 
-    // Chuyển sang "Tất cả" -> High hiện (2), Tất cả cờ (5)
-    await page.click("#segBtnAll");
-    await expect(allPrioPill).toContainText("Tất cả cờ (5)");
-    await expect(highPill).toContainText("High (2)");
+    // Bấm Xóa task quá 30 ngày -> xóa 2 task (35 ngày & 31 ngày), giữ lại 2 task mới xong + 1 task chưa làm
+    await page.click("#btnClearDoneTasks");
+    await expect(page.locator("#countDoneBadge")).toHaveText("2");
+    await expect(page.locator("#countTodoBadge")).toHaveText("1");
+    await expect(page.locator("#btnClearDoneTasks")).toHaveText("🗑️ Xóa task quá 30 ngày (0)");
+    await expect(page.locator("#btnClearDoneTasks")).toBeDisabled();
+    await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
 
-    // Bỏ tích High Task 1 để quay lại Chưa làm kiểm thử chọn nhiều cờ cùng lúc
-    await page.locator(".task-card", { hasText: "High Task 1" }).locator(".task-checkbox").click();
-    await page.click("#segBtnTodo");
-    await expect(highPill).toContainText("High (1)");
-    await expect(allPrioPill).toContainText("Tất cả cờ (4)");
+    // Đổi mốc ngày sang 3 ngày trước -> hiển thị nút Xóa task từ <ngày> trở về trước (1) cho task 5 ngày trước
+    await page.fill("#clearDoneDateInput", threeDaysAgoDateStr);
+    await expect(page.locator("#btnClearDoneTasks")).toHaveText(
+      `🗑️ Xóa task từ ${threeDaysAgoDateStr} trở về trước (1)`
+    );
+    await expect(page.locator("#btnClearDoneTasks")).toBeEnabled();
 
-    // Chọn cờ High -> High active, Tất cả cờ bỏ active (1 task)
-    await highPill.click();
-    await expect(allPrioPill).not.toHaveClass(/active/);
-    await expect(highPill).toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(1);
+    await page.click("#btnClearDoneTasks");
+    await expect(page.locator("#countDoneBadge")).toHaveText("1");
+    await expect(page.locator("#countTodoBadge")).toHaveText("1");
 
-    // Chọn thêm cờ Low -> cả High & Low cùng active (2 tasks)
-    await lowPill.click();
-    await expect(highPill).toHaveClass(/active/);
-    await expect(lowPill).toHaveClass(/active/);
-    await expect(allPrioPill).not.toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(2);
+    // Mở folder "Cá nhân" kiểm chứng task hôm nay vẫn còn, và kiểm tra bền vững sau reload
+    await page.locator('.group-section[data-group-name="Cá nhân"] .group-header').click();
+    await expect(page.locator(".task-card .task-title")).toHaveText("Việc vừa xong hôm nay");
 
-    // Chọn thêm cờ Không ưu tiên -> 3 cờ cùng active (3 tasks)
-    await nonePill.click();
-    await expect(nonePill).toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(3);
-
-    // Bấm lại cờ Low để bỏ chọn riêng cờ Low -> còn High & Không ưu tiên (2 tasks)
-    await lowPill.click();
-    await expect(lowPill).not.toHaveClass(/active/);
-    await expect(highPill).toHaveClass(/active/);
-    await expect(nonePill).toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(2);
-
-    // Ấn "Tất cả cờ" -> bỏ chọn toàn bộ cờ lẻ, hiển thị đủ 4 task Chưa làm
-    await allPrioPill.click();
-    await expect(allPrioPill).toHaveClass(/active/);
-    await expect(highPill).not.toHaveClass(/active/);
-    await expect(medPill).not.toHaveClass(/active/);
-    await expect(lowPill).not.toHaveClass(/active/);
-    await expect(nonePill).not.toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(4);
-
-    // Chọn 1 cờ rồi bấm lại chính cờ đó -> tự động quay về "Tất cả cờ"
-    await medPill.click();
-    await expect(medPill).toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(1);
-    await medPill.click();
-    await expect(medPill).not.toHaveClass(/active/);
-    await expect(allPrioPill).toHaveClass(/active/);
-    await expect(page.locator(".task-card")).toHaveCount(4);
+    await page.reload();
+    await expect(page.locator("#countDoneBadge")).toHaveText("1");
+    await expect(page.locator("#countTodoBadge")).toHaveText("1");
 
     assertCleanConsole();
   });
@@ -1288,6 +1312,9 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       host.appendChild(plain);
       document.body.appendChild(host);
     });
+
+    // Mở rộng folder "Công việc" trước khi kiểm tra nút Copy và Paste trên thẻ công việc
+    await page.locator('.group-section[data-group-name="Công việc"] .group-header').click();
 
     // 3a. Task có đúng 1 ảnh: bấm "📋 Copy" -> copy cả Text + 1 Ảnh nguyên bản (452x399) không bị vỡ
     const oneImgCard = page.locator(".task-card", { hasText: "Task Có Mô Tả Và 1 Ảnh" });
@@ -1449,24 +1476,28 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.selectOption("#taskGroupSelect", "Công việc/Dự án A/Sprint 1");
     await page.click("#btnSubmitTask");
 
-    // Kiểm tra giao diện cây thư mục lồng nhau trong tab Danh sách và bộ lọc theo cây
+    // Kiểm tra giao diện cây thư mục lồng nhau trong tab Danh sách (mặc định thu gọn -> mở rộng từng cấp & kiểm tra nút ➕ Thêm ở subfolder)
     const rootSection = page.locator('.group-section[data-group-name="Công việc"]');
+    const midSection = rootSection.locator(
+      '.group-section-nested[data-group-name="Công việc/Dự án A"]'
+    );
     const nestedSection = rootSection.locator(
       '.group-section-nested[data-group-name="Công việc/Dự án A/Sprint 1"]'
     );
     await expect(rootSection).toBeVisible();
+    await expect(rootSection.locator(".group-header").first()).toHaveAttribute("aria-expanded", "false");
+    await rootSection.locator("> .group-header").click();
+    await expect(midSection).toBeVisible();
+    await midSection.locator("> .group-header").click();
     await expect(nestedSection).toBeVisible();
+    await nestedSection.locator("> .group-header").click();
     await expect(nestedSection).toContainText("Thiết kế kiến trúc Git Tree");
 
-    // Khi lọc theo nhóm cha "Công việc", phải hiển thị cả công việc của nhóm con/cháu
-    await page.click('#groupFilterBar .filter-pill[data-group="Công việc"]');
-    await expect(page.locator(".task-card")).toHaveCount(2);
-
-    // Khi lọc riêng nhóm cháu "Công việc/Dự án A/Sprint 1", chỉ hiển thị 1 công việc
-    await page.click('#groupFilterBar .filter-pill[data-group="Công việc/Dự án A/Sprint 1"]');
-    await expect(page.locator(".task-card")).toHaveCount(1);
-    await expect(page.locator(".task-card").first()).toContainText("Thiết kế kiến trúc Git Tree");
-    await page.click('#groupFilterBar .filter-pill[data-group="ALL"]');
+    // Kiểm tra nút ➕ Thêm trên thư mục cháu chọn sẵn đúng đường dẫn thư mục cháu
+    await nestedSection.locator("> .group-header .btn-folder-add-task").click();
+    await expect(page.locator("#viewAddTask")).toHaveClass(/active/);
+    await expect(page.locator("#taskGroupSelect")).toHaveValue("Công việc/Dự án A/Sprint 1");
+    await page.click("#btnCancelEdit");
 
     // 3. Mock GitHub Git Trees API để kiểm tra Push/Pull từng thư mục thành <folder>/tasks.json
     let headCommitSha = "commit_initial_001";
@@ -1674,5 +1705,190 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     await context.unroute("https://api.github.com/**");
     assertCleanConsole();
+  });
+
+  test("11. Tự động cập nhật Extension qua Native Messaging (Hướng dẫn cài 1 lần, git pull & tự reload)", async () => {
+    // A. Khi chưa cài Native Messaging Host: bấm 🔄 chuyển sang tab Cài đặt và hiển thị lệnh chuẩn kèm Extension ID
+    const { page, assertCleanConsole } = await openExtensionPopupPage();
+    await page.click("#btnUpdateExtension");
+
+    await expect(page.locator("#viewSettings")).toHaveClass(/active/);
+    await expect(page.locator("#updaterHostStatusBadge")).toContainText("Chưa cài Native Host");
+    const expectedCmd = `./scripts/install-updater.sh ${extensionId}`;
+    await expect(page.locator("#updaterInstallCmdText")).toHaveText(expectedCmd);
+
+    // Kiểm tra nút Copy lệnh sao chép chính xác lệnh vào Clipboard
+    await page.evaluate(() => {
+      const ta = document.createElement("textarea");
+      ta.id = "e2ePasteUpdaterCmd";
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+    });
+    await page.click("#btnCopyUpdaterCmd");
+    await expect(page.locator("#btnCopyUpdaterCmd")).toHaveText("✓ Đã copy");
+    await page.focus("#e2ePasteUpdaterCmd");
+    await page.keyboard.press("Control+V");
+    await expect(page.locator("#e2ePasteUpdaterCmd")).toHaveValue(expectedCmd);
+    assertCleanConsole();
+    await page.close();
+
+    // B. Kiểm thử luồng Native Messaging thật với Git bare repo tạm + Chromium profile cô lập
+    const crypto = require("crypto");
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gittask-updater-e2e-"));
+    const bareRepoDir = path.join(tmpRoot, "remote.git");
+    const workRepoDir = path.join(tmpRoot, "work-repo");
+    const localRepoDir = path.join(tmpRoot, "local-repo");
+    const isolatedUserDataDir = path.join(tmpRoot, "chrome-user-data");
+    const isolatedConfigDir = path.join(tmpRoot, "xdg-config");
+
+    let ctx2;
+    try {
+      const runGit = (cwd, args) =>
+        execFileSync("git", args, {
+          cwd,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test Bot",
+            GIT_AUTHOR_EMAIL: "bot@example.com",
+            GIT_COMMITTER_NAME: "Test Bot",
+            GIT_COMMITTER_EMAIL: "bot@example.com"
+          }
+        }).trim();
+
+      fs.mkdirSync(bareRepoDir, { recursive: true });
+      runGit(bareRepoDir, ["init", "--bare", "-b", "main"]);
+
+      fs.mkdirSync(workRepoDir, { recursive: true });
+      runGit(workRepoDir, ["init", "-b", "main"]);
+      fs.cpSync(EXTENSION_PATH, path.join(workRepoDir, "extension"), { recursive: true });
+      fs.mkdirSync(path.join(workRepoDir, "scripts"), { recursive: true });
+      fs.copyFileSync(
+        path.resolve(__dirname, "../scripts/native-updater.py"),
+        path.join(workRepoDir, "scripts/native-updater.py")
+      );
+      fs.chmodSync(path.join(workRepoDir, "scripts/native-updater.py"), 0o755);
+
+      runGit(workRepoDir, ["add", "."]);
+      runGit(workRepoDir, ["commit", "-m", "init extension repo"]);
+      runGit(workRepoDir, ["remote", "add", "origin", bareRepoDir]);
+      runGit(workRepoDir, ["push", "-u", "origin", "main"]);
+
+      runGit(tmpRoot, ["clone", bareRepoDir, localRepoDir]);
+      fs.chmodSync(path.join(localRepoDir, "scripts/native-updater.py"), 0o755);
+
+      const localExtDir = path.join(localRepoDir, "extension");
+      const beforeCommit = runGit(localRepoDir, ["rev-parse", "--short", "HEAD"]);
+
+      const digest = crypto.createHash("sha256").update(localExtDir, "utf8").digest("hex").slice(0, 32);
+      const expectedExtId2 = digest
+        .split("")
+        .map((ch) => String.fromCharCode(97 + parseInt(ch, 16)))
+        .join("");
+
+      const nativeHostPayload = JSON.stringify(
+        {
+          name: "com.gittask.updater",
+          description: "GitTask Sync Native Git Pull Updater",
+          path: path.join(localRepoDir, "scripts/native-updater.py"),
+          type: "stdio",
+          allowed_origins: [`chrome-extension://${expectedExtId2}/`]
+        },
+        null,
+        2
+      );
+
+      for (const hostParent of [
+        isolatedUserDataDir,
+        path.join(isolatedConfigDir, "chromium"),
+        path.join(isolatedConfigDir, "google-chrome")
+      ]) {
+        const hostsDir = path.join(hostParent, "NativeMessagingHosts");
+        fs.mkdirSync(hostsDir, { recursive: true });
+        fs.writeFileSync(path.join(hostsDir, "com.gittask.updater.json"), nativeHostPayload, "utf8");
+      }
+
+      const launchIsolatedContext = async () => {
+        const ctx = await chromium.launchPersistentContext(isolatedUserDataDir, {
+          channel: "chromium",
+          headless: true,
+          env: {
+            ...process.env,
+            XDG_CONFIG_HOME: isolatedConfigDir
+          },
+          args: [
+            `--disable-extensions-except=${localExtDir}`,
+            `--load-extension=${localExtDir}`,
+            "--no-first-run",
+            "--no-default-browser-check"
+          ]
+        });
+        let [sw] = ctx.serviceWorkers();
+        if (!sw) {
+          sw = await ctx.waitForEvent("serviceworker", { timeout: 15000 });
+        }
+        return { ctx, sw };
+      };
+
+      const launched = await launchIsolatedContext();
+      ctx2 = launched.ctx;
+      const actualExtId2 = new URL(launched.sw.url()).host;
+      expect(actualExtId2).toBe(expectedExtId2);
+
+      const page2 = await ctx2.newPage();
+      const page2Errors = [];
+      page2.on("pageerror", (e) => page2Errors.push(e.message));
+      await page2.goto(`chrome-extension://${actualExtId2}/popup.html`);
+
+      // Kiểm tra kết nối Native Host thành công
+      await page2.click("#tabBtnSettings");
+      await expect(page2.locator("#updaterHostStatusBadge")).toContainText(
+        `✓ Đã kết nối (main @ ${beforeCommit})`
+      );
+
+      // Tạo commit mới đẩy lên bare repo từ workRepoDir
+      fs.writeFileSync(path.join(workRepoDir, "extension/UPDATED_MARKER.txt"), "v1.0.1\n", "utf8");
+      runGit(workRepoDir, ["add", "."]);
+      runGit(workRepoDir, ["commit", "-m", "feat: new extension update"]);
+      runGit(workRepoDir, ["push", "origin", "main"]);
+      const afterCommit = runGit(workRepoDir, ["rev-parse", "--short", "HEAD"]);
+      expect(afterCommit).not.toBe(beforeCommit);
+
+      // Bấm 🔄 Cập nhật ngay trên Extension -> git pull & gọi chrome.runtime.reload() (tự đóng page2)
+      const page2ClosedPromise = page2.waitForEvent("close", { timeout: 10000 });
+      await page2.click("#btnUpdateExtension");
+
+      // Xác minh repo cục bộ đã pull lên đúng commit mới và chrome.runtime.reload() đã kích hoạt
+      await expect
+        .poll(() => runGit(localRepoDir, ["rev-parse", "--short", "HEAD"]), { timeout: 10000 })
+        .toBe(afterCommit);
+      expect(fs.existsSync(path.join(localRepoDir, "extension/UPDATED_MARKER.txt"))).toBe(true);
+      await page2ClosedPromise;
+
+      // Khởi tạo lại persistent context trên cùng userDataDir (giữ nguyên chrome.storage.local) để mô phỏng sau khi nạp lại Extension
+      await ctx2.close();
+      ctx2 = null;
+      const relaunched = await launchIsolatedContext();
+      ctx2 = relaunched.ctx;
+
+      const page3 = await ctx2.newPage();
+      await page3.goto(`chrome-extension://${actualExtId2}/popup.html`);
+      await expect(page3.locator("#statusBanner")).toContainText(
+        `Đã cập nhật Extension thành công (${beforeCommit} → ${afterCommit})`
+      );
+
+      // Bấm 🔄 lần nữa khi đã ở commit mới nhất -> báo đang ở bản mới nhất
+      await page3.click("#btnUpdateExtension");
+      await expect(page3.locator("#statusBanner")).toContainText(
+        `Extension đang ở bản mới nhất (main @ ${afterCommit})`
+      );
+      expect(page2Errors).toEqual([]);
+    } finally {
+      if (ctx2) {
+        await ctx2.close();
+      }
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });

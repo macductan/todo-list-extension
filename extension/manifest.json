@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "description": "Quản lý công việc (To-Do) bằng 100% Vanilla JS siêu nhẹ, đồng bộ trực tiếp và xử lý xung đột qua GitHub REST API (Contents API).",
   "permissions": [
-    "storage"
+    "storage",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://api.github.com/*"

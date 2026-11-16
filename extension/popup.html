@@ -34,6 +34,9 @@
         <button type="button" class="icon-btn" id="btnToggleTheme" title="Đổi giao diện Sáng / Tối">
           🌗
         </button>
+        <button type="button" class="icon-btn" id="btnUpdateExtension" title="Cập nhật mã nguồn Extension (git pull &amp; tự nạp lại)">
+          🔄
+        </button>
         <button type="button" class="icon-btn" id="btnOpenFloatingWindow" title="Mở dưới dạng Cửa sổ nổi độc lập (Floating Popup Window)">
           🪟 Cửa sổ nổi
         </button>
@@ -120,9 +123,6 @@
             <button type="button" class="status-seg-btn active" data-statusfilter="todo" id="segBtnTodo">
               ⏳ Chưa làm (<span id="countTodoBadge">0</span>)
             </button>
-            <button type="button" class="status-seg-btn" data-statusfilter="all" id="segBtnAll">
-              📋 Tất cả (<span id="countAllBadge">0</span>)
-            </button>
             <button type="button" class="status-seg-btn" data-statusfilter="done" id="segBtnDone">
               ✅ Đã xong (<span id="countDoneBadge">0</span>)
             </button>
@@ -130,42 +130,27 @@
 
           <select id="statusFilterSelect" class="ext-select hidden-control" title="Lọc theo trạng thái">
             <option value="todo" selected>Chưa làm</option>
-            <option value="all">Tất cả</option>
             <option value="done">Đã xong</option>
           </select>
         </div>
 
-        <div class="grouping-bar-row">
-          <div class="grouping-toggles">
-            <button
-              type="button"
-              class="icon-btn accent-outline"
-              id="btnToggleGroupBy"
-              title="Ẩn/hiển thị chia nhóm công việc theo Nhóm (Group)"
-            >
-              🗂 Nhóm Group: BẬT
-            </button>
-            <button
-              type="button"
-              class="icon-btn accent-outline"
-              id="btnTogglePriorityGroup"
-              title="Ẩn/hiển thị chia nhóm công việc theo mức độ ưu tiên (Priority) bên trong mỗi Nhóm"
-            >
-              🚩 Nhóm Priority: BẬT
-            </button>
+        <div class="done-clear-bar hidden-control" id="doneClearBar" aria-label="Dọn dẹp công việc đã xong">
+          <div class="done-clear-left">
+            <label class="done-clear-label" for="clearDoneDateInput">🗓️ Xóa việc xong từ ngày:</label>
+            <input
+              type="date"
+              id="clearDoneDateInput"
+              class="ext-input done-clear-date-input"
+              title="Chọn mốc ngày để xóa các công việc đã xong từ ngày này trở về trước"
+            />
           </div>
-          <div class="filter-pills" id="priorityFilterBar" aria-label="Lọc theo cờ ưu tiên"></div>
-        </div>
-
-        <div class="filter-bar-row">
-          <div class="filter-pills" id="groupFilterBar" aria-label="Lọc theo nhóm công việc"></div>
           <button
             type="button"
-            class="icon-btn"
-            id="btnQuickManageGroups"
-            title="Mở quản lý Thêm / Sửa / Xóa Nhóm công việc"
+            class="btn-danger-sm"
+            id="btnClearDoneTasks"
+            title="Xóa vĩnh viễn các công việc đã hoàn thành tính từ mốc ngày đã chọn trở về trước"
           >
-            ✏️ Quản lý nhóm
+            🗑️ Xóa task quá 30 ngày (0)
           </button>
         </div>
 
@@ -487,6 +472,38 @@
             </button>
           </div>
         </form>
+
+        <div class="settings-group" id="updaterSettingsCard">
+          <div class="form-header-row">
+            <span class="section-heading">🔄 Cập nhật mã nguồn Extension (Git Pull trực tiếp)</span>
+            <span class="updater-status-pill" id="updaterHostStatusBadge">Chưa kiểm tra</span>
+          </div>
+
+          <div class="settings-note-text">
+            Bấm nút <strong>🔄</strong> trên thanh tiêu đề để tự động chạy <code>git pull --ff-only</code> ngay tại thư mục repo trên máy và tự nạp lại Extension (chỉ cần đăng ký Native Messaging Host 1 lần đầu).
+          </div>
+
+          <div class="updater-cmd-box" id="updaterSetupBox">
+            <div class="field-label">
+              <span>Lệnh cài đặt 1 lần trong thư mục gốc của repo:</span>
+            </div>
+            <div class="updater-cmd-row">
+              <code class="updater-cmd-code" id="updaterInstallCmdText">./scripts/install-updater.sh</code>
+              <button type="button" class="icon-btn" id="btnCopyUpdaterCmd" title="Sao chép lệnh cài đặt">
+                📋 Copy lệnh
+              </button>
+            </div>
+          </div>
+
+          <div class="form-actions-end">
+            <button type="button" class="btn-secondary" id="btnCheckUpdaterStatus">
+              🔍 Kiểm tra kết nối
+            </button>
+            <button type="button" class="btn-primary" id="btnSettingsUpdateExt">
+              🔄 Kéo code mới &amp; Nạp lại Extension
+            </button>
+          </div>
+        </div>
 
         <div class="security-guide-box">
           <div class="security-guide-title">

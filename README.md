@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/macductan/todo-list-extension)
 [![Manifest](https://img.shields.io/badge/Manifest-V3-success.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
-[![Playwright Tests](https://img.shields.io/badge/playwright-10%2F10%20passed-brightgreen.svg)](tests/)
+[![Playwright Tests](https://img.shields.io/badge/playwright-11%2F11%20passed-brightgreen.svg)](tests/)
 [![Vanilla JS](https://img.shields.io/badge/built%20with-100%25%20Vanilla%20JS-F7DF1E.svg)](extension/)
 [![License](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
 
@@ -16,22 +16,20 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
 - Lưu trữ chuẩn cấu trúc: `id`, `title`, `description`, `group`, `priority`, `status`, `updatedAt`, cùng tùy chọn đính kèm ảnh chụp màn hình nén nhẹ.
 - **Rút gọn mô tả thông minh & Copy nhanh kèm ảnh**: Mặc định ẩn mô tả trong danh sách; khi mở tự động giới hạn 2 dòng kèm nút `Xem thêm ▾` / `Thu gọn ▴`. Nút `📋 Copy` trên thẻ công việc cho phép sao chép tức thì cả văn bản mô tả (`text/plain`, `text/html` an toàn XSS) lẫn hình ảnh đính kèm (`image/png`) vào Clipboard mà không cần mở mô tả trước.
 - **Thông báo Toast tự động ẩn**: Hiển thị thông báo nổi gọn nhẹ kèm thanh đếm ngược tự ẩn, tự động tạm dừng khi rê chuột vào đọc.
-- Chuyển đổi trạng thái nhanh (`Chưa làm` ↔ `Đã xong`), tự động đưa các việc đã hoàn thành xuống cuối danh sách.
-- Tìm kiếm theo từ khóa theo thời gian thực trên cả Tiêu đề và Mô tả task.
+- **2 Tab trạng thái tinh gọn (`⏳ Chưa làm` / `✅ Đã xong`) & Dọn dẹp theo ngày**: Chuyển đổi trạng thái nhanh giữa `Chưa làm` ↔ `Đã xong`. Ở tab `✅ Đã xong`, có thanh chọn mốc ngày (mặc định lùi 30 ngày so với hôm nay) kèm nút `🗑️ Xóa task quá 30 ngày` (hoặc xóa từ ngày đã chọn trở về trước) để dọn dẹp nhanh các công việc cũ.
+- Tìm kiếm theo từ khóa theo thời gian thực trên cả Tiêu đề, Mô tả và Nhóm của task.
 
-### 2. 🚩 4 Mức Cờ Ưu Tiên & Bộ lọc linh hoạt (Multi-select Priority)
-- 4 cấp độ ưu tiên với màu sắc nhận diện trực quan:
+### 2. 🚩 4 Mức Cờ Ưu Tiên
+- 4 cấp độ ưu tiên với màu sắc nhận diện trực quan trên từng thẻ công việc (và tự động sắp xếp thứ tự ưu tiên từ cao xuống thấp bên trong từng Folder):
   - 🔴 **High** (Ưu tiên Cao)
   - 🟡 **Medium** (Ưu tiên Trung bình)
   - 🔵 **Low** (Ưu tiên Thấp)
   - ⚪ **None** (Không ưu tiên)
-- **Lọc nhiều cờ cùng lúc**: Cho phép chọn đồng thời nhiều cờ (ví dụ High + Medium); nút `Tất cả cờ` hỗ trợ bật/tắt toàn bộ nhanh chóng.
-- Huy hiệu số đếm (`badge count`) tự động đồng bộ theo bộ lọc trạng thái (`Đang làm` / `Đã xong`).
 
-### 3. 🗂️ Cây Thư Mục Đa Cấp (`Cha / Con / Cháu`) & Phân cấp `Nhóm -> Priority`
+### 3. 🗂️ Cây Thư Mục Đa Cấp (`Cha / Con / Cháu`) & Thao tác nhanh trên Folder
 - Hỗ trợ tổ chức công việc theo **cây thư mục nhiều tầng** (ví dụ: `Công việc` ➔ `Công việc/Dự án A` ➔ `Công việc/Dự án A/Sprint 1`).
-- Danh sách công việc hiển thị trực quan cấu trúc thư mục lồng nhau (`nested group section`) kết hợp phân tầng **Cờ ưu tiên (`Priority`)**.
-- Khi lọc theo thư mục cha trên thanh công cụ, hệ thống tự động hiển thị toàn bộ công việc thuộc thư mục cha và các thư mục con/cháu bên trong.
+- Danh sách công việc hiển thị trực quan cấu trúc thư mục lồng nhau (`nested group section`), **mặc định thu gọn** toàn bộ Folder để giao diện gọn gàng và chỉ hiển thị số lượng công việc (`X công việc`).
+- Ở tab `⏳ Chưa làm`, hiển thị đầy đủ tất cả Folder (kể cả Folder đang trống) kèm nút `➕ Thêm` ngay trên thanh tiêu đề của từng Folder để mở form tạo công việc chọn sẵn đúng Folder đó.
 - Tab `🗂️ Quản lý Nhóm` chuyên biệt:
   - Tạo thư mục gốc hoặc thư mục con thông qua ô chọn **Thư mục cha**, nhập đường dẫn phân cách bởi `/`, hoặc bấm nút `➕ Nhóm con` ngay trên từng dòng thư mục.
   - Đổi tên thư mục cha tự động cập nhật dây chuyền (`cascade`) sang toàn bộ thư mục con/cháu và các công việc bên trong.
@@ -62,8 +60,12 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
   - Cung cấp tùy chọn minh bạch: Mở file trên GitHub, Xem lịch sử Commit, **Force Pull** (nhận bản từ xa) hoặc **Force Push** (ghi đè bản cục bộ).
 - Hỗ trợ xử lý file lớn (> 1MB) tự động thông qua **Git Blobs API** (`/git/blobs`).
 
-### 7. 🛡️ Bảo mật chuẩn Manifest V3 & Chống XSS
-- **Tối thiểu hóa quyền**: Chỉ yêu cầu `permissions: ["storage"]` và `host_permissions: ["https://api.github.com/*"]`. Không chèn `content_scripts`, không theo dõi lịch sử duyệt web.
+### 7. 🔄 Tự động cập nhật Extension ngay trên giao diện (`git pull` + Reload)
+- Nút **`🔄`** ngay trên thanh tiêu đề cho phép chạy `git pull --ff-only` trực tiếp tại thư mục repo trên máy thông qua **Chrome Native Messaging** (`scripts/native-updater.py`) và tự động gọi `chrome.runtime.reload()` để nạp lại bản mới mà không cần mở terminal hay vào `chrome://extensions`.
+- Cài đặt 1 lần duy nhất bằng `./scripts/install-updater.sh` (hỗ trợ gỡ bỏ với `--uninstall`).
+
+### 8. 🛡️ Bảo mật chuẩn Manifest V3 & Chống XSS
+- **Tối thiểu hóa quyền**: Chỉ yêu cầu `permissions: ["storage", "nativeMessaging"]` và `host_permissions: ["https://api.github.com/*"]`. Không chèn `content_scripts`, không theo dõi lịch sử duyệt web.
 - **Bảo mật Token**: GitHub Personal Access Token lưu trong `chrome.storage.local`, trường nhập mật khẩu ẩn ký tự (`type="password"`), tự động che mờ (`redact`) trong logs/thông báo lỗi.
 - **Chống tấn công XSS**: Render toàn bộ văn bản qua `textContent`, kiểm tra nghiêm ngặt định dạng MIME ảnh đính kèm (chỉ nhận PNG, JPG, WEBP, GIF; chặn SVG chứa mã thực thi), chặn đường dẫn Directory Traversal (`..`).
 - **Giao diện đa phong cách**: Chuyển đổi Dark Mode / Light Mode mượt mà.
@@ -76,9 +78,12 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
 todo-list-extension/
 ├── .gitignore              # Bỏ qua node_modules, log, kết quả kiểm thử
 ├── README.md               # Tài liệu hướng dẫn sử dụng và đặc tả kỹ thuật
+├── scripts/                # Native Messaging Host tự động git pull & cài đặt
+│   ├── native-updater.py   # Host Python 3 thực thi ping & git pull --ff-only
+│   └── install-updater.sh  # Script đăng ký Native Messaging Host với trình duyệt
 ├── extension/              # Mã nguồn Chrome Extension (Cài đặt Load Unpacked)
 │   ├── manifest.json       # Khai báo quyền hạn và metadata chuẩn Manifest V3
-│   ├── background.js       # Service worker khởi tạo & điều hướng Floating Window
+│   ├── background.js       # Service worker khởi tạo, Floating Window & Native Updater
 │   ├── popup.html          # Giao diện HTML semantic chính
 │   ├── styles.css          # Hệ thống CSS biến (Dark/Light), Flexbox & Grid
 │   ├── app.js              # Toàn bộ logic CRUD, GitHub API, Auto Push & UI
@@ -89,7 +94,7 @@ todo-list-extension/
 └── tests/                  # Bộ kiểm thử E2E tự động bằng Playwright
     ├── package.json        # Cấu hình dependency Playwright
     ├── playwright.config.js# Cấu hình nạp Extension vào Chromium Headless
-    └── extension.e2e.spec.js # 8 kịch bản kiểm thử E2E bao phủ toàn diện
+    └── extension.e2e.spec.js # 11 kịch bản kiểm thử E2E bao phủ toàn diện
 ```
 
 ---
@@ -109,6 +114,11 @@ todo-list-extension/
 4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** ở góc trên bên trái.
 5. Chọn thư mục `extension/` trong dự án `todo-list-extension`.
 6. Biểu tượng **GitTask Sync** sẽ xuất hiện trên thanh công cụ trình duyệt!
+7. *(Tùy chọn — Bật nút `🔄` cập nhật 1 click)* Chạy lệnh sau **1 lần duy nhất** tại thư mục gốc của repo để đăng ký Native Messaging Host (sau này chỉ cần bấm `🔄` trên Extension là tự `git pull` & reload):
+   ```bash
+   ./scripts/install-updater.sh
+   ```
+   *(Nếu cần truyền kèm ID riêng của Extension, bạn có thể copy trực tiếp lệnh có sẵn ID trong tab **⚙️ GitHub & Bảo mật** ➔ mục **🔄 Cập nhật mã nguồn Extension**).*
 
 ---
 
@@ -145,17 +155,18 @@ npm install
 npm test
 ```
 
-### Các kịch bản kiểm thử bao phủ (10 test suites):
+### Các kịch bản kiểm thử bao phủ (11 test suites):
 1. **CRUD & Local Storage**: Tạo, Đọc, Sửa, Xóa task, đóng/mở mô tả chi tiết, lưu trữ `chrome.storage.local`.
 2. **Sort & Search**: Đánh dấu Hoàn thành, tự động sắp xếp task xong xuống dưới, tìm kiếm từ khóa, chuyển đổi Dark/Light mode.
 3. **GitHub Sync & Conflict**: Xử lý path chứa ký tự đặc biệt, Pull/Push, bảo vệ Dirty Local, phát hiện xung đột HTTP 409 & hiển thị link GitHub.
 4. **Bảo mật & Sanitization**: Chống tấn công XSS, chặn Directory Traversal (`..`), lọc MIME ảnh an toàn, ẩn token trong thông báo lỗi.
 5. **Edge Cases**: Đồng bộ mảng rỗng `[]`, xử lý file lớn (> 1MB) qua Blobs API, mất kết nối mạng khi PUT, mã lỗi 403 Rate Limit.
-6. **Mô tả & Nhóm**: Rút gọn mô tả tự động (2 dòng), nút xem thêm/thu gọn, chia nhóm và ẩn/hiện task theo Nhóm và Priority.
+6. **Giao diện Folder, Rút gọn mô tả & 4 màu cờ**: Nút `➕ Thêm` trên từng Folder (kể cả Folder trống), mặc định thu gọn Folder ở màn danh sách, chỉ hiển thị số lượng công việc, bỏ các filter/option nhóm thừa, rút gọn mô tả tự động (2 dòng) kèm Xem thêm/Thu gọn.
 7. **Cửa sổ nổi & Auto Push**: Mở Floating Window (`chrome.windows.create`), đếm ngược Auto Push 2 bộ đếm (Idle timer & Max timer), trạng thái Cây sạch/Chưa sạch.
-8. **Bộ lọc Multi-select Priority**: Chọn đồng thời nhiều cờ ưu tiên, nút Tất cả cờ, kiểm tra biến động số đếm khi thay đổi trạng thái hoàn thành.
+8. **Dọn dẹp tab Đã xong theo ngày**: Thanh dọn dẹp ở tab `Đã xong` với mốc mặc định lùi 30 ngày (`🗑️ Xóa task quá 30 ngày`) và hỗ trợ xóa các công việc đã xong từ ngày tùy chọn trở về trước.
 9. **Copy nhanh (Text + Ảnh) & Toast tự ẩn**: Sao chép đồng thời văn bản mô tả và nhiều hình ảnh đính kèm qua `ClipboardItem` (chống XSS khi paste), copy ảnh lẻ từ Lightbox, và thông báo Toast nổi tự động ẩn (kèm tạm dừng khi hover).
 10. **Cây thư mục đa cấp & Git Trees API**: Tạo thư mục con/cháu nhiều tầng, lọc công việc theo nhánh thư mục, đổi tên thư mục cha cập nhật dây chuyền xuống thư mục con, đánh dấu Dirty khi thao tác thư mục và đồng bộ từng thư mục thành `<folder>/tasks.json` qua Git Trees API.
+11. **Native Messaging Updater (`git pull` + Reload)**: Kiểm tra hướng dẫn & copy lệnh khi chưa cài host, kết nối Native Messaging Host trong môi trường cô lập, chạy `git pull --ff-only` kéo commit mới, tự reload Extension và báo đã ở bản mới nhất.
 
 ---
 
