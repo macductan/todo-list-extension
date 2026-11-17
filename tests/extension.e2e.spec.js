@@ -883,9 +883,9 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     );
     expect(manifestJson.permissions).toEqual(["storage", "nativeMessaging"]);
     expect(manifestJson.host_permissions).toEqual(["https://api.github.com/*"]);
-    expect(manifestJson.action.default_popup).toBe("popup.html");
+    expect(manifestJson.action.default_popup).toBeUndefined();
 
-    // ==================== A. KIỂM THỬ TRẠNG THÁI BAN ĐẦU CÂY SẠCH & MẶC ĐỊNH AUTO PUSH + POPUP DEFAULT ====================
+    // ==================== A. KIỂM THỬ TRẠNG THÁI BAN ĐẦU CÂY SẠCH & MẶC ĐỊNH AUTO PUSH + WINDOW DEFAULT ====================
     await expect(page.locator("#treeStatusBadge")).toHaveText("✓ Cây sạch");
     await expect(page.locator("#treeStatusBadge")).toHaveClass(/clean/);
 
@@ -895,7 +895,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await expect(page.locator("#autoPushDebounceUnit")).toHaveValue("s");
     await expect(page.locator("#autoPushMaxWaitValue")).toHaveValue("5");
     await expect(page.locator("#autoPushMaxWaitUnit")).toHaveValue("m");
-    await expect(page.locator("#launchModeSelect")).toHaveValue("popup");
+    await expect(page.locator("#launchModeSelect")).toHaveValue("window");
 
     // ==================== B. KIỂM THỬ QUẢN LÝ CRUD NHÓM (REQ 7) ====================
     await page.click("#tabBtnGroups");

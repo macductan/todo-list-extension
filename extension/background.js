@@ -9,7 +9,7 @@ function applyActionLaunchMode(launchMode) {
   if (!chrome.action || typeof chrome.action.setPopup !== "function") {
     return;
   }
-  const useAttachedPopup = launchMode !== "window";
+  const useAttachedPopup = launchMode === "popup";
   chrome.action.setPopup(
     { popup: useAttachedPopup ? "popup.html" : "" },
     () => {
@@ -30,6 +30,15 @@ function applyActionLaunchMode(launchMode) {
   }
 }
 
+function clearSavedFloatingWindowId() {
+  if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== "function") {
+    return;
+  }
+  chrome.storage.local.remove(["floatingWindowId"], () => {
+    void (chrome.runtime && chrome.runtime.lastError);
+  });
+}
+
 function openOrFocusFloatingWindow(sendResponse) {
   const targetUrl = chrome.runtime.getURL("popup.html?mode=window");
 
@@ -40,43 +49,101 @@ function openOrFocusFloatingWindow(sendResponse) {
     const savedId =
       stored && typeof stored.floatingWindowId === "number" ? stored.floatingWindowId : null;
 
-    const createFreshWindow = () => {
-      chrome.windows.create(
-        {
-          url: targetUrl,
-          type: "popup",
-          width: FLOATING_WIN_WIDTH,
-          height: FLOATING_WIN_HEIGHT,
-          focused: true
-        },
-        (createdWin) => {
-          if (chrome.runtime && chrome.runtime.lastError) {
-            if (typeof sendResponse === "function") {
-              sendResponse({ ok: false });
-            }
-            return;
-          }
-          const winId = createdWin && typeof createdWin.id === "number" ? createdWin.id : null;
-          if (winId !== null) {
-            chrome.storage.local.set({ floatingWindowId: winId }, () => {
-              void (chrome.runtime && chrome.runtime.lastError);
-            });
-          }
+    const createFreshWindow = (bounds) => {
+      const baseOpts = {
+        url: targetUrl,
+        type: "popup",
+        width:
+          bounds && typeof bounds.width === "number" && bounds.width >= 320
+            ? Math.round(bounds.width)
+            : FLOATING_WIN_WIDTH,
+        height:
+          bounds && typeof bounds.height === "number" && bounds.height >= 240
+            ? Math.round(bounds.height)
+            : FLOATING_WIN_HEIGHT,
+        focused: true
+      };
+      const createOpts = Object.assign({}, baseOpts);
+      let hasExplicitPos = false;
+      if (
+        bounds &&
+        typeof bounds.left === "number" &&
+        Number.isFinite(bounds.left) &&
+        bounds.left >= 0
+      ) {
+        createOpts.left = Math.round(bounds.left);
+        hasExplicitPos = true;
+      }
+      if (
+        bounds &&
+        typeof bounds.top === "number" &&
+        Number.isFinite(bounds.top) &&
+        bounds.top >= 0
+      ) {
+        createOpts.top = Math.round(bounds.top);
+        hasExplicitPos = true;
+      }
+
+      const onWindowCreated = (createdWin) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
           if (typeof sendResponse === "function") {
-            sendResponse({ ok: true, windowId: winId, reused: false });
+            sendResponse({ ok: false });
           }
+          return;
         }
-      );
+        const winId = createdWin && typeof createdWin.id === "number" ? createdWin.id : null;
+        if (winId !== null) {
+          chrome.storage.local.set({ floatingWindowId: winId }, () => {
+            void (chrome.runtime && chrome.runtime.lastError);
+          });
+        }
+        if (typeof sendResponse === "function") {
+          sendResponse({ ok: true, windowId: winId, reused: false });
+        }
+      };
+
+      chrome.windows.create(createOpts, (createdWin) => {
+        if (chrome.runtime && chrome.runtime.lastError && hasExplicitPos) {
+          chrome.windows.create(baseOpts, onWindowCreated);
+          return;
+        }
+        onWindowCreated(createdWin);
+      });
     };
 
     if (savedId !== null) {
-      chrome.windows.get(savedId, (existingWin) => {
-        if ((chrome.runtime && chrome.runtime.lastError) || !existingWin) {
+      chrome.windows.get(savedId, { populate: true }, (existingWin) => {
+        const isMatchingExtPopup =
+          !(chrome.runtime && chrome.runtime.lastError) &&
+          existingWin &&
+          existingWin.type === "popup" &&
+          Array.isArray(existingWin.tabs) &&
+          existingWin.tabs.some((t) => t && (t.url === targetUrl || t.pendingUrl === targetUrl));
+
+        if (!isMatchingExtPopup) {
+          clearSavedFloatingWindowId();
           createFreshWindow();
           return;
         }
+
+        if (existingWin.state === "minimized" || !existingWin.focused) {
+          const bounds = {
+            width: existingWin.width,
+            height: existingWin.height,
+            left: existingWin.left,
+            top: existingWin.top
+          };
+          chrome.windows.remove(savedId, () => {
+            void (chrome.runtime && chrome.runtime.lastError);
+            clearSavedFloatingWindowId();
+            createFreshWindow(bounds);
+          });
+          return;
+        }
+
         chrome.windows.update(savedId, { focused: true }, () => {
           if (chrome.runtime && chrome.runtime.lastError) {
+            clearSavedFloatingWindowId();
             createFreshWindow();
             return;
           }
@@ -91,19 +158,22 @@ function openOrFocusFloatingWindow(sendResponse) {
   });
 }
 
+function resolvePreferredLaunchMode(uiPrefs) {
+  return uiPrefs && uiPrefs.preferredLaunchMode === "popup" ? "popup" : "window";
+}
+
 function syncLaunchModeFromStorage() {
   chrome.storage.local.get(["uiPrefs"], (stored) => {
     if (chrome.runtime && chrome.runtime.lastError) {
-      applyActionLaunchMode("popup");
+      applyActionLaunchMode("window");
       return;
     }
-    const mode =
-      stored && stored.uiPrefs && stored.uiPrefs.launchMode === "window" ? "window" : "popup";
-    applyActionLaunchMode(mode);
+    applyActionLaunchMode(resolvePreferredLaunchMode(stored && stored.uiPrefs));
   });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
+  clearSavedFloatingWindowId();
   chrome.storage.local.get(["tasks", "groups", "syncMeta", "uiPrefs"], (stored) => {
     if (chrome.runtime && chrome.runtime.lastError) {
       return;
@@ -129,9 +199,7 @@ chrome.runtime.onInstalled.addListener(() => {
       };
     }
 
-    const currentLaunchMode =
-      safeStored.uiPrefs && safeStored.uiPrefs.launchMode === "window" ? "window" : "popup";
-    applyActionLaunchMode(currentLaunchMode);
+    applyActionLaunchMode(resolvePreferredLaunchMode(safeStored.uiPrefs));
 
     if (Object.keys(updates).length > 0) {
       chrome.storage.local.set(updates, () => {
@@ -143,15 +211,17 @@ chrome.runtime.onInstalled.addListener(() => {
 
 if (chrome.runtime && chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
+    clearSavedFloatingWindowId();
     syncLaunchModeFromStorage();
   });
 }
 
+syncLaunchModeFromStorage();
+
 if (chrome.storage && chrome.storage.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes.uiPrefs && changes.uiPrefs.newValue) {
-      const nextMode = changes.uiPrefs.newValue.launchMode === "window" ? "window" : "popup";
-      applyActionLaunchMode(nextMode);
+      applyActionLaunchMode(resolvePreferredLaunchMode(changes.uiPrefs.newValue));
     }
   });
 }

@@ -36,10 +36,9 @@ Chrome Extension quản lý công việc cá nhân (To-Do) siêu nhẹ, được
   - Sắp xếp thứ tự hiển thị anh em cùng cấp bằng nút `↑` / `↓`.
   - Xóa nhánh thư mục an toàn: bắt buộc chọn chuyển công việc sang thư mục khác trước khi xóa, và mọi thao tác thêm/sửa/xóa/sắp xếp thư mục đều đánh dấu trạng thái **Chưa sạch (`Dirty`)** để đồng bộ lên Git.
 
-### 4. 🪟 Popup tiện dụng & Cửa sổ nổi độc lập (Floating Window)
-- **Popup mặc định**: Nhấn icon trên thanh công cụ mở giao diện kích thước chuẩn `780×600`.
-- **Cửa sổ nổi (Floating Window)**: Nút `🪟 Cửa sổ nổi` mở riêng cửa sổ độc lập qua `chrome.windows.create` (`type: "popup"`), thoải mái kéo thả, ghim cạnh màn hình làm việc, không phụ thuộc vào tab trình duyệt đang mở.
-- Hỗ trợ tùy chọn mở thẳng Cửa sổ nổi khi nhấn icon trong phần Cài đặt.
+### 4. 🪟 Cửa sổ nổi độc lập mặc định (Floating Window) & Popup gắn thanh công cụ
+- **Cửa sổ nổi (Floating Window — Mặc định)**: Khi bấm icon Extension trên thanh công cụ, tự động mở hoặc bật lại cửa sổ nổi độc lập qua `chrome.windows.create` (`type: "popup"`), thoải mái kéo thả, ghim cạnh màn hình làm việc, không phụ thuộc vào tab trình duyệt đang mở.
+- **Popup gắn thanh công cụ**: Hỗ trợ chuyển đổi lại chế độ Popup (`780×600`) trong tab Cài đặt nếu muốn.
 
 ### 5. 🔄 Auto Push 2 Bộ đếm & Trạng thái Cây dữ liệu (`Clean` / `Dirty`)
 - Hiển thị trực quan trạng thái trên thanh tiêu đề:

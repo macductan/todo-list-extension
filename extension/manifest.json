@@ -11,8 +11,7 @@
     "https://api.github.com/*"
   ],
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "GitTask Sync (Popup gắn thanh công cụ)",
+    "default_title": "GitTask Sync (Nhấn để mở Cửa sổ nổi)",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

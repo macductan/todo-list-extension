@@ -93,7 +93,13 @@
 
   function isSafeImageDataUrl(url) {
     if (typeof url !== "string") return false;
-    return /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(url.trim());
+    const trimmed = url.trim();
+    if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(trimmed.slice(0, 40))) {
+      return false;
+    }
+    const commaIdx = trimmed.indexOf(",");
+    if (commaIdx === -1 || commaIdx + 1 >= trimmed.length) return false;
+    return !/[^A-Za-z0-9+/=]/.test(trimmed.slice(commaIdx + 1));
   }
 
   function generateTaskId() {
@@ -514,7 +520,7 @@
     statusFilter: "todo",
     searchQuery: "",
     theme: "dark",
-    launchMode: "popup",
+    launchMode: "window",
     openDescriptions: new Set(),
     expandedDescriptions: new Set(),
     expandedCategoryGroups: new Set(),
@@ -946,8 +952,13 @@
       if (stored.uiPrefs.theme === "light" || stored.uiPrefs.theme === "dark") {
         state.theme = stored.uiPrefs.theme;
       }
-      if (stored.uiPrefs.launchMode === "popup" || stored.uiPrefs.launchMode === "window") {
-        state.launchMode = stored.uiPrefs.launchMode;
+      if (
+        stored.uiPrefs.preferredLaunchMode === "popup" ||
+        stored.uiPrefs.preferredLaunchMode === "window"
+      ) {
+        state.launchMode = stored.uiPrefs.preferredLaunchMode;
+      } else {
+        state.launchMode = "window";
       }
     }
 
@@ -1015,7 +1026,7 @@
         syncMeta: state.syncMeta,
         uiPrefs: {
           theme: state.theme,
-          launchMode: state.launchMode
+          preferredLaunchMode: state.launchMode
         }
       });
       updateHeaderAndFooterMeta();
@@ -1784,7 +1795,8 @@
     renderDoneClearBar();
   }
 
-  function createTaskCardDOM(task) {
+  function createTaskCardDOM(task, options) {
+    const deferImages = Boolean(options && options.deferImages);
     const card = document.createElement("div");
     card.className = "task-card" + (task.status === "done" ? " done" : "");
     card.dataset.taskId = task.id;
@@ -1858,7 +1870,12 @@
 
         const thumb = document.createElement("img");
         thumb.className = "task-img-thumb";
-        thumb.src = imgObj.dataUrl;
+        thumb.loading = "lazy";
+        if (deferImages) {
+          thumb.dataset.deferred = "1";
+        } else {
+          thumb.src = imgObj.dataUrl;
+        }
         thumb.alt = imgObj.name || "Ảnh đính kèm";
         thumb.title = "Nhấn để phóng to: " + (imgObj.name || `Ảnh ${idx + 1}`);
         thumb.addEventListener("click", () => {
@@ -2115,7 +2132,7 @@
 
     if (directGroupTasks.length > 0) {
       sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
-        body.appendChild(createTaskCardDOM(t));
+        body.appendChild(createTaskCardDOM(t, { deferImages: isCollapsed }));
       });
     } else if (!hasChildSections) {
       const emptyHint = document.createElement("div");
@@ -4261,7 +4278,7 @@
     if (apDebUnitEl) apDebUnitEl.value = state.autoPushConfig.debounceUnit === "m" ? "m" : "s";
     if (apMaxValEl) apMaxValEl.value = String(state.autoPushConfig.maxWaitValue || 5);
     if (apMaxUnitEl) apMaxUnitEl.value = state.autoPushConfig.maxWaitUnit === "s" ? "s" : "m";
-    if (launchModeEl) launchModeEl.value = state.launchMode === "window" ? "window" : "popup";
+    if (launchModeEl) launchModeEl.value = state.launchMode === "popup" ? "popup" : "window";
   }
 
   async function handleSavePreferences(e) {
@@ -4296,7 +4313,7 @@
       maxWaitValue: Math.max(1, Math.min(86400, Math.floor(rawMax))),
       maxWaitUnit: apMaxUnitEl && apMaxUnitEl.value === "s" ? "s" : "m"
     };
-    state.launchMode = launchModeEl && launchModeEl.value === "window" ? "window" : "popup";
+    state.launchMode = launchModeEl && launchModeEl.value === "popup" ? "popup" : "window";
 
     if (state.syncMeta.dirty) {
       const now = Date.now();
