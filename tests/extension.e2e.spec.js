@@ -1891,4 +1891,285 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
+
+  test("12. Auto-save (Debounce) khi sửa công việc & Auto Pull tự động khi mở Extension", async () => {
+    const autoPullPat = "pat_autosave_autopull_123456";
+    const { page, assertCleanConsole } = await openExtensionPopupPage(autoPullPat, {
+      allowExpectedHttpFailureLogs: true
+    });
+
+    // ==================== A. AUTO-SAVE (DEBOUNCE) KHI SỬA CÔNG VIỆC ====================
+    // Khi tạo task mới: badge Auto-save ẩn và gõ không tự tạo task
+    await page.click("#btnQuickGoAdd");
+    await expect(page.locator("#autoSaveStatusBadge")).toBeHidden();
+    await page.fill("#taskTitleInput", "Task Ban Đầu Cho Auto-save");
+    await page.fill("#taskDescInput", "Mô tả gốc");
+    await page.waitForTimeout(550);
+    await expect(page.locator("#navTaskCount")).toHaveText("0");
+    await page.click("#btnSubmitTask");
+    await expect(page.locator("#navTaskCount")).toHaveText("1");
+
+    // Mở sửa task -> badge Auto-save hiện sẵn sàng
+    const workSection = page.locator('.group-section[data-group-name="Công việc"]');
+    await workSection.locator(".group-header").click();
+    await workSection.locator(".task-card .btn-edit-task").click();
+
+    await expect(page.locator("#viewAddTask")).toHaveClass(/active/);
+    await expect(page.locator("#autoSaveStatusBadge")).toBeVisible();
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("⚡ Tự động lưu");
+
+    // Gõ tiêu đề & mô tả liên tiếp -> giữ focus, hiện "⏳ Đang lưu...", sau debounce 400ms tự lưu thành "✓ Đã tự động lưu"
+    const titleInput = page.locator("#taskTitleInput");
+    const descInput = page.locator("#taskDescInput");
+
+    await titleInput.fill("Task Đã Auto-save");
+    await titleInput.focus();
+    await titleInput.pressSequentially(" Tiêu Đề Mới", { delay: 30 });
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("⏳ Đang lưu...");
+    expect(await page.evaluate(() => document.activeElement && document.activeElement.id)).toBe(
+      "taskTitleInput"
+    );
+
+    await descInput.focus();
+    await descInput.fill("Mô tả đã gõ tự động lưu");
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("⏳ Đang lưu...");
+    expect(await page.evaluate(() => document.activeElement && document.activeElement.id)).toBe(
+      "taskDescInput"
+    );
+
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("✓ Đã tự động lưu", {
+      timeout: 2000
+    });
+    await expect(page.locator("#viewAddTask")).toHaveClass(/active/);
+    await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
+
+    // Xác minh chrome.storage.local đã nhận dữ liệu mới ngay cả khi chưa ấn nút Lưu
+    const storedAfterDebounce = await page.evaluate(() => {
+      return new Promise((resolve) => {
+        chrome.storage.local.get(["tasks"], (res) => resolve(res.tasks));
+      });
+    });
+    expect(storedAfterDebounce).toHaveLength(1);
+    expect(storedAfterDebounce[0].title).toBe("Task Đã Auto-save Tiêu Đề Mới");
+    expect(storedAfterDebounce[0].description).toBe("Mô tả đã gõ tự động lưu");
+
+    // Kiểm tra xóa trắng tiêu đề -> cảnh báo và không ghi đè tiêu đề rỗng
+    await titleInput.fill("   ");
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText(
+      "⚠️ Tên công việc không được trống"
+    );
+    await page.waitForTimeout(500);
+    const storedAfterEmptyTitle = await page.evaluate(() => {
+      return new Promise((resolve) => {
+        chrome.storage.local.get(["tasks"], (res) => resolve(res.tasks));
+      });
+    });
+    expect(storedAfterEmptyTitle[0].title).toBe("Task Đã Auto-save Tiêu Đề Mới");
+
+    // Gõ sửa tiêu đề mới rồi lập tức bấm "← Quay lại Danh sách" trước khi hết debounce -> flush lưu ngay
+    await titleInput.fill("Task Flush Khi Quay Lại");
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("⏳ Đang lưu...");
+    await page.click("#btnCancelEdit");
+    await expect(page.locator("#viewTasks")).toHaveClass(/active/);
+    await expect(workSection.locator(".task-card .task-title")).toHaveText(
+      "Task Flush Khi Quay Lại"
+    );
+
+    // Gõ sửa mô tả rồi lập tức bấm chuyển tab #tabBtnTasks trước khi hết debounce -> flush lưu ngay
+    await workSection.locator(".task-card .btn-edit-task").click();
+    await descInput.fill("Mô tả được flush khi chuyển tab");
+    await expect(page.locator("#autoSaveStatusBadge")).toHaveText("⏳ Đang lưu...");
+    await page.click("#tabBtnTasks");
+    await expect(page.locator("#viewTasks")).toHaveClass(/active/);
+    await workSection.locator(".task-card .btn-toggle-desc").click();
+    await expect(workSection.locator(".task-card .task-desc-text")).toHaveText(
+      "Mô tả được flush khi chuyển tab"
+    );
+
+    // ==================== B. AUTO PULL KHI MỞ EXTENSION ====================
+    let remotePullCount = 0;
+    let remoteSha = "";
+    let remoteTasks = [];
+
+    await context.route("https://api.github.com/**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (
+        url.pathname === "/repos/auto-pull-org/auto-pull-repo/contents/tasks.json" &&
+        req.method() === "GET"
+      ) {
+        remotePullCount += 1;
+        if (!remoteSha) {
+          await route.fulfill({
+            status: 404,
+            contentType: "application/json",
+            body: JSON.stringify({ message: "Not Found" })
+          });
+          return;
+        }
+        const jsonStr = JSON.stringify(remoteTasks, null, 2);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            name: "tasks.json",
+            path: "tasks.json",
+            size: Buffer.byteLength(jsonStr, "utf8"),
+            sha: remoteSha,
+            encoding: "base64",
+            content: encodeGitHubMimeBase64(jsonStr)
+          })
+        });
+        return;
+      }
+      if (
+        url.pathname === "/repos/auto-pull-org/auto-pull-repo/contents/tasks.json" &&
+        req.method() === "PUT"
+      ) {
+        const body = JSON.parse(req.postData() || "{}");
+        remoteTasks = JSON.parse(decodeUtf8Base64(body.content));
+        remoteSha = "bbbb2222cccc3333dddd4444eeee5555ffff6666";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ content: { sha: remoteSha } })
+        });
+        return;
+      }
+      await route.fulfill({ status: 404, body: JSON.stringify({ message: "Not Found" }) });
+    });
+
+    // Lưu cấu hình GitHub (mặc định "Bật Auto Pull khi mở" đang bật và chu kỳ mặc định là 5 phút)
+    await page.click("#tabBtnSettings");
+    await expect(page.locator("#autoPullEnabledInput")).toBeChecked();
+    await expect(page.locator("#autoPullIntervalValue")).toHaveValue("5");
+    await expect(page.locator("#autoPullIntervalUnit")).toHaveValue("m");
+    await page.fill("#ghOwnerInput", "auto-pull-org");
+    await page.fill("#ghRepoInput", "auto-pull-repo");
+    await page.fill("#ghBranchInput", "main");
+    await page.fill("#ghFilePathInput", "tasks.json");
+    await page.fill("#ghTokenInput", autoPullPat);
+    await page.click("#btnSaveGitHubConfig");
+
+    // Bấm Push để đưa cây cục bộ về trạng thái sạch (dirty: false) & ghi nhận mốc vừa đồng bộ
+    await page.click("#btnPushGitHub");
+    await expect(page.locator("#treeStatusBadge")).toHaveText("✓ Cây sạch (Đã commit)");
+
+    // Giả lập thiết bị khác cập nhật thêm task mới lên GitHub
+    remoteSha = "cccc3333dddd4444eeee5555ffff666677778888";
+    remoteTasks = [
+      ...remoteTasks,
+      {
+        id: "remote-new-2",
+        title: "Task Mới Tự Động Pull Khi Mở",
+        description: "Được tải tự động ngay khi mở Extension",
+        group: "Dự án GitHub",
+        priority: "high",
+        status: "todo",
+        updatedAt: "2026-11-18T03:00:00.000Z"
+      }
+    ];
+
+    // Vừa đồng bộ chưa quá 5 phút -> mở lại ngay KHÔNG gọi Auto Pull để tránh lag
+    const pullsBeforeFreshReload = remotePullCount;
+    await page.reload();
+    await page.waitForTimeout(300);
+    expect(remotePullCount).toBe(pullsBeforeFreshReload);
+    await expect(page.locator("#navTaskCount")).toHaveText("1");
+
+    // Giả lập lần đồng bộ / pull cuối cùng đã quá 5 phút (lùi về 10 phút trước) -> mở lại phải TỰ ĐỘNG Pull
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        chrome.storage.local.get(["syncMeta"], (res) => {
+          const tenMinAgoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+          const nextMeta = Object.assign({}, res.syncMeta || {}, {
+            lastSyncAt: tenMinAgoIso,
+            lastPullAt: tenMinAgoIso
+          });
+          chrome.storage.local.set({ syncMeta: nextMeta }, resolve);
+        });
+      });
+    });
+
+    const pullsBeforeStaleReload = remotePullCount;
+    await page.reload();
+    await expect.poll(() => remotePullCount, { timeout: 5000 }).toBeGreaterThan(pullsBeforeStaleReload);
+    await expect(page.locator("#statusBanner")).toContainText("Auto Pull thành công");
+    await expect(page.locator("#headerShaBadge")).toContainText("base_sha: cccc333");
+    await expect(page.locator("#navTaskCount")).toHaveText("2");
+
+    // Ngay sau khi Auto Pull vừa chạy xong -> mốc lastPullAt đã cập nhật mới -> reload lại KHÔNG gọi Auto Pull nữa
+    const pullsRightAfterAutoPull = remotePullCount;
+    await page.reload();
+    await page.waitForTimeout(300);
+    expect(remotePullCount).toBe(pullsRightAfterAutoPull);
+
+    await page.locator('.group-section[data-group-name="Dự án GitHub"] .group-header').click();
+    await expect(
+      page.locator(".task-card", { hasText: "Task Mới Tự Động Pull Khi Mở" })
+    ).toBeVisible();
+
+    // Bảo vệ dữ liệu cục bộ: Khi cây đang dirty (chưa Push) -> kể cả quá hạn X phút mở lại vẫn KHÔNG Auto Pull ghi đè
+    await page.click("#btnQuickGoAdd");
+    await page.fill("#taskTitleInput", "Task Local Chưa Push");
+    await page.click("#btnSubmitTask");
+    await expect(page.locator("#treeStatusBadge")).toContainText("Chưa sạch");
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        chrome.storage.local.get(["syncMeta"], (res) => {
+          const tenMinAgoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+          const nextMeta = Object.assign({}, res.syncMeta || {}, {
+            lastSyncAt: tenMinAgoIso,
+            lastPullAt: tenMinAgoIso
+          });
+          chrome.storage.local.set({ syncMeta: nextMeta }, resolve);
+        });
+      });
+    });
+
+    const pullsBeforeDirtyReload = remotePullCount;
+    await page.reload();
+    await page.waitForTimeout(300);
+    expect(remotePullCount).toBe(pullsBeforeDirtyReload);
+    await expect(page.locator("#navTaskCount")).toHaveText("3");
+
+    // Push xong về sạch -> Tắt công tắc Auto Pull -> quá hạn vẫn KHÔNG tự động Pull
+    await page.click("#btnPushGitHub");
+    await expect(page.locator("#treeStatusBadge")).toHaveText("✓ Cây sạch (Đã commit)");
+
+    await page.click("#tabBtnSettings");
+    await page.uncheck("#autoPullEnabledInput");
+    await expect(page.locator("#autoPullEnabledInput")).not.toBeChecked();
+
+    remoteSha = "dddd4444eeee5555ffff66667777888899990000";
+    remoteTasks.push({
+      id: "remote-ignored-when-off",
+      title: "Task Không Tự Pull Khi Tắt",
+      description: "",
+      group: "Công việc",
+      priority: "low",
+      status: "todo",
+      updatedAt: "2026-11-18T04:00:00.000Z"
+    });
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        chrome.storage.local.get(["syncMeta"], (res) => {
+          const tenMinAgoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+          const nextMeta = Object.assign({}, res.syncMeta || {}, {
+            lastSyncAt: tenMinAgoIso,
+            lastPullAt: tenMinAgoIso
+          });
+          chrome.storage.local.set({ syncMeta: nextMeta }, resolve);
+        });
+      });
+    });
+
+    const pullsBeforeDisabledReload = remotePullCount;
+    await page.reload();
+    await page.waitForTimeout(300);
+    expect(remotePullCount).toBe(pullsBeforeDisabledReload);
+    await expect(page.locator("#navTaskCount")).toHaveText("3");
+
+    assertCleanConsole();
+  });
 });

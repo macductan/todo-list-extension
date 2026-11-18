@@ -161,7 +161,10 @@
       <section class="ext-view" id="viewAddTask" aria-label="Thêm hoặc sửa công việc">
         <form class="task-form-card" id="taskForm" autocomplete="off">
           <div class="form-header-row">
-            <span class="section-heading" id="formModeTitle">➕ Thêm công việc mới</span>
+            <div class="form-header-title-wrap">
+              <span class="section-heading" id="formModeTitle">➕ Thêm công việc mới</span>
+              <span class="autosave-status-pill hidden-control" id="autoSaveStatusBadge" aria-live="polite"></span>
+            </div>
             <button type="button" class="text-link-btn" id="btnToggleDescInput">
               📝 Ẩn/Hiện vùng mô tả
             </button>
@@ -397,11 +400,40 @@
 
         <form class="settings-group" id="autoPushAndWindowForm" autocomplete="off">
           <div class="form-header-row">
-            <span class="section-heading">⚡ Cấu hình Auto Push &amp; Cửa sổ nổi</span>
-            <label class="toggle-check-label" for="autoPushEnabledInput">
-              <input type="checkbox" id="autoPushEnabledInput" checked />
-              <span>Bật Auto Push tự động</span>
+            <span class="section-heading">⚡ Cấu hình Auto Pull, Auto Push &amp; Cửa sổ nổi</span>
+            <div class="settings-toggles-wrap">
+              <label class="toggle-check-label" for="autoPullEnabledInput">
+                <input type="checkbox" id="autoPullEnabledInput" checked />
+                <span>Bật Auto Pull khi mở</span>
+              </label>
+              <label class="toggle-check-label" for="autoPushEnabledInput">
+                <input type="checkbox" id="autoPushEnabledInput" checked />
+                <span>Bật Auto Push tự động</span>
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <label class="field-label" for="autoPullIntervalValue">
+              <span>Chỉ Auto Pull khi mở lại nếu lần cuối đã quá</span>
+              <span class="label-hint">Mặc định: 5p (tránh lag khi mở lại liên tục)</span>
             </label>
+            <div class="inline-flex-gap">
+              <input
+                type="number"
+                id="autoPullIntervalValue"
+                class="ext-input"
+                min="1"
+                max="86400"
+                step="1"
+                value="5"
+                required
+              />
+              <select id="autoPullIntervalUnit" class="ext-select unit-select" title="Đơn vị thời gian chờ giữa các lần Auto Pull">
+                <option value="s">giây (s)</option>
+                <option value="m" selected>phút (p)</option>
+              </select>
+            </div>
           </div>
 
           <div class="form-row-2col">

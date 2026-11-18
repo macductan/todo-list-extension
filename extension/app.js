@@ -13,6 +13,7 @@
   const MAX_IMAGE_COUNT_PER_TASK = 6;
   const MAX_SAFE_REMOTE_BYTES = 8 * 1024 * 1024;
   const FETCH_TIMEOUT_MS = 15000;
+  const EDIT_AUTOSAVE_DEBOUNCE_MS = 400;
   const ALLOWED_IMAGE_MIMES = new Set([
     "image/png",
     "image/jpeg",
@@ -538,6 +539,9 @@
     },
     autoPushConfig: {
       enabled: true,
+      autoPullOnOpen: true,
+      autoPullIntervalValue: 5,
+      autoPullIntervalUnit: "m",
       debounceValue: 10,
       debounceUnit: "s",
       maxWaitValue: 5,
@@ -546,6 +550,7 @@
     syncMeta: {
       base_sha: null,
       lastSyncAt: null,
+      lastPullAt: null,
       syncedRepoKey: null,
       dirty: false,
       firstDirtyAt: null,
@@ -557,6 +562,8 @@
     isUpdatingExt: false,
     isSavingStorage: false,
     autoPushTimerId: null,
+    editAutoSaveTimerId: null,
+    editAutoSavePromise: null,
     treeCountdownIntervalId: null,
     bannerActionHandler: null,
     bannerAutoHideTimerId: null,
@@ -909,6 +916,9 @@
       const srcAp = stored.autoPushConfig;
       state.autoPushConfig = {
         enabled: typeof srcAp.enabled === "boolean" ? srcAp.enabled : true,
+        autoPullOnOpen: typeof srcAp.autoPullOnOpen === "boolean" ? srcAp.autoPullOnOpen : true,
+        autoPullIntervalValue: Math.max(1, Math.floor(Number(srcAp.autoPullIntervalValue) || 5)),
+        autoPullIntervalUnit: srcAp.autoPullIntervalUnit === "s" ? "s" : "m",
         debounceValue: Math.max(1, Math.floor(Number(srcAp.debounceValue) || 10)),
         debounceUnit: srcAp.debounceUnit === "m" ? "m" : "s",
         maxWaitValue: Math.max(1, Math.floor(Number(srcAp.maxWaitValue) || 5)),
@@ -932,6 +942,8 @@
         base_sha: typeof stored.syncMeta.base_sha === "string" ? stored.syncMeta.base_sha : null,
         lastSyncAt:
           typeof stored.syncMeta.lastSyncAt === "string" ? stored.syncMeta.lastSyncAt : null,
+        lastPullAt:
+          typeof stored.syncMeta.lastPullAt === "string" ? stored.syncMeta.lastPullAt : null,
         syncedRepoKey:
           typeof stored.syncMeta.syncedRepoKey === "string" ? stored.syncMeta.syncedRepoKey : null,
         dirty: isDirty,
@@ -974,6 +986,13 @@
     state.syncMeta.lastDirtyAt = now;
     state.syncMeta.autoPushPausedReason = null;
     state.syncMeta.autoPushOwnerId = INSTANCE_ID;
+  }
+
+  function getAutoPullIntervalMs(cfg) {
+    const src = cfg || state.autoPushConfig;
+    const val = Math.max(1, Math.floor(Number(src.autoPullIntervalValue) || 5));
+    const unitMs = src.autoPullIntervalUnit === "s" ? 1000 : 60000;
+    return val * unitMs;
   }
 
   function getAutoPushDelaysMs(cfg) {
@@ -1453,6 +1472,9 @@
         ev.stopPropagation();
         state.pendingFormImages.splice(index, 1);
         renderFormImagePreviews();
+        if (document.getElementById("taskEditId").value.trim()) {
+          scheduleEditAutoSave();
+        }
       });
 
       wrap.appendChild(imgEl);
@@ -2555,6 +2577,9 @@
     renderFormImagePreviews();
     if (added > 0) {
       showBanner(`Đã đính kèm ${added} hình ảnh.`, "success");
+      if (document.getElementById("taskEditId").value.trim()) {
+        scheduleEditAutoSave();
+      }
     }
   }
 
@@ -2572,6 +2597,9 @@
       input.value = "";
       document.getElementById("newGroupRow").classList.remove("open");
       document.getElementById("taskGroupSelect").value = existingMatch;
+      if (document.getElementById("taskEditId").value.trim()) {
+        scheduleEditAutoSave();
+      }
       showBanner(`Đã chọn nhóm "${existingMatch}" hiện có.`, "info");
       return;
     }
@@ -2589,6 +2617,9 @@
       document.getElementById("newGroupRow").classList.remove("open");
       renderAll();
       document.getElementById("taskGroupSelect").value = resolvedAdded;
+      if (document.getElementById("taskEditId").value.trim()) {
+        scheduleEditAutoSave();
+      }
       showBanner(`Đã sẵn sàng nhóm "${resolvedAdded}".`, "success");
     } catch (err) {
       state.groups = prevGroups;
@@ -2930,7 +2961,199 @@
     }
   }
 
+  function updateAutoSaveBadgeUI(mode, customText) {
+    const badgeEl = document.getElementById("autoSaveStatusBadge");
+    if (!badgeEl) return;
+    if (!mode || mode === "hidden") {
+      badgeEl.className = "autosave-status-pill hidden-control";
+      badgeEl.textContent = "";
+      return;
+    }
+    badgeEl.className = "autosave-status-pill " + mode;
+    if (mode === "saving") {
+      badgeEl.textContent = customText || "⏳ Đang lưu...";
+    } else if (mode === "saved") {
+      badgeEl.textContent = customText || "✓ Đã tự động lưu";
+    } else if (mode === "warning") {
+      badgeEl.textContent = customText || "⚠️ Tên công việc không được trống";
+    } else {
+      badgeEl.textContent = customText || "⚡ Tự động lưu";
+    }
+  }
+
+  function cancelPendingEditAutoSave() {
+    if (state.editAutoSaveTimerId !== null) {
+      clearTimeout(state.editAutoSaveTimerId);
+      state.editAutoSaveTimerId = null;
+    }
+  }
+
+  function areTaskImageArraysEqual(arrA, arrB) {
+    const listA = Array.isArray(arrA)
+      ? arrA.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
+      : [];
+    const listB = Array.isArray(arrB)
+      ? arrB.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
+      : [];
+    if (listA.length !== listB.length) return false;
+    for (let i = 0; i < listA.length; i += 1) {
+      if (
+        listA[i].id !== listB[i].id ||
+        listA[i].name !== listB[i].name ||
+        listA[i].dataUrl !== listB[i].dataUrl
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function hasTaskFormChangedFromTask(task) {
+    if (!task) return false;
+    const title = document.getElementById("taskTitleInput").value.trim();
+    const description = document.getElementById("taskDescInput").value.trim();
+    const group = document.getElementById("taskGroupSelect").value.trim() || "Công việc";
+    const rawPriority = document.getElementById("taskPrioritySelect").value.trim().toLowerCase();
+    const priority = VALID_PRIORITIES.includes(rawPriority) ? rawPriority : "none";
+
+    if ((task.title || "") !== title) return true;
+    if ((task.description || "") !== description) return true;
+    if ((task.group || "Công việc") !== group) return true;
+    const taskPrio = VALID_PRIORITIES.includes(task.priority) ? task.priority : "none";
+    if (taskPrio !== priority) return true;
+    if (!areTaskImageArraysEqual(state.pendingFormImages, task.images)) return true;
+    return false;
+  }
+
+  async function performEditAutoSave() {
+    cancelPendingEditAutoSave();
+    if (state.editAutoSavePromise) {
+      await state.editAutoSavePromise;
+    }
+
+    const editId = document.getElementById("taskEditId").value.trim();
+    if (!editId || state.isSyncing) return false;
+
+    const idx = state.tasks.findIndex((t) => t.id === editId);
+    if (idx === -1) return false;
+
+    const title = document.getElementById("taskTitleInput").value.trim();
+    if (!title) {
+      updateAutoSaveBadgeUI("warning", "⚠️ Tên công việc không được trống");
+      return false;
+    }
+
+    if (!hasTaskFormChangedFromTask(state.tasks[idx])) {
+      updateAutoSaveBadgeUI("saved");
+      return false;
+    }
+
+    const description = document.getElementById("taskDescInput").value.trim();
+    const group = document.getElementById("taskGroupSelect").value.trim() || "Công việc";
+    const rawPriority = document.getElementById("taskPrioritySelect").value.trim().toLowerCase();
+    const priority = VALID_PRIORITIES.includes(rawPriority) ? rawPriority : "none";
+    const attachedImages = state.pendingFormImages
+      .filter((img) => img && isSafeImageDataUrl(img.dataUrl))
+      .slice(0, MAX_IMAGE_COUNT_PER_TASK);
+
+    const prevTasksSnapshot = state.tasks.slice();
+    const prevGroupsSnapshot = state.groups.slice();
+    const prevSyncMeta = Object.assign({}, state.syncMeta);
+    const prevOpen = new Set(state.openDescriptions);
+    const prevExpanded = new Set(state.expandedDescriptions);
+
+    if (!state.groups.includes(group)) {
+      state.groups.push(group);
+    }
+
+    const updated = {
+      id: state.tasks[idx].id,
+      title,
+      description,
+      group,
+      priority,
+      status: state.tasks[idx].status === "done" ? "done" : "todo",
+      updatedAt: new Date().toISOString()
+    };
+    if (attachedImages.length > 0) {
+      updated.images = attachedImages;
+    }
+    state.tasks[idx] = updated;
+    if (!description) {
+      state.openDescriptions.delete(updated.id);
+      state.expandedDescriptions.delete(updated.id);
+    }
+    markWorkingTreeDirty();
+
+    const savePromise = (async () => {
+      try {
+        await persistAllToStorage();
+        renderFiltersAndCounters();
+        renderTaskList();
+        renderGroupCrudList();
+        updateHeaderAndFooterMeta();
+        if (
+          document.getElementById("taskEditId").value.trim() === editId &&
+          state.editAutoSaveTimerId === null
+        ) {
+          updateAutoSaveBadgeUI("saved");
+        }
+        return true;
+      } catch (err) {
+        state.tasks = prevTasksSnapshot;
+        state.groups = prevGroupsSnapshot;
+        state.syncMeta = prevSyncMeta;
+        state.openDescriptions = prevOpen;
+        state.expandedDescriptions = prevExpanded;
+        updateAutoSaveBadgeUI("warning", "⚠️ Không thể tự động lưu");
+        showBanner(err.message || "Không thể tự động lưu công việc.", "error");
+        return false;
+      } finally {
+        if (state.editAutoSavePromise === savePromise) {
+          state.editAutoSavePromise = null;
+        }
+      }
+    })();
+
+    state.editAutoSavePromise = savePromise;
+    return await savePromise;
+  }
+
+  function scheduleEditAutoSave() {
+    const editId = document.getElementById("taskEditId").value.trim();
+    if (!editId) return;
+
+    cancelPendingEditAutoSave();
+
+    const title = document.getElementById("taskTitleInput").value.trim();
+    if (!title) {
+      updateAutoSaveBadgeUI("warning", "⚠️ Tên công việc không được trống");
+      return;
+    }
+
+    updateAutoSaveBadgeUI("saving");
+    state.editAutoSaveTimerId = setTimeout(() => {
+      state.editAutoSaveTimerId = null;
+      void performEditAutoSave();
+    }, EDIT_AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  async function flushPendingEditAutoSave() {
+    if (state.editAutoSaveTimerId !== null) {
+      return await performEditAutoSave();
+    }
+    if (state.editAutoSavePromise) {
+      await state.editAutoSavePromise;
+      if (state.editAutoSaveTimerId !== null) {
+        return await performEditAutoSave();
+      }
+    }
+    return false;
+  }
+
   function resetTaskForm() {
+    cancelPendingEditAutoSave();
+    updateAutoSaveBadgeUI("hidden");
     document.getElementById("taskEditId").value = "";
     document.getElementById("taskTitleInput").value = "";
     document.getElementById("taskDescInput").value = "";
@@ -2947,6 +3170,11 @@
   async function handleSaveTaskForm(e) {
     if (e) e.preventDefault();
     if (state.isSyncing) return;
+
+    cancelPendingEditAutoSave();
+    if (state.editAutoSavePromise) {
+      await state.editAutoSavePromise;
+    }
 
     const editId = document.getElementById("taskEditId").value.trim();
     const title = document.getElementById("taskTitleInput").value.trim();
@@ -3055,6 +3283,8 @@
     const task = state.tasks.find((t) => t.id === taskId);
     if (!task) return;
 
+    cancelPendingEditAutoSave();
+
     if (task.group && !state.groups.includes(task.group)) {
       state.groups.push(task.group);
       renderFiltersAndCounters();
@@ -3075,6 +3305,7 @@
 
     document.getElementById("formModeTitle").textContent = "✏️ Chỉnh sửa công việc";
     document.getElementById("btnSubmitTask").textContent = "💾 Cập nhật Công Việc";
+    updateAutoSaveBadgeUI("idle");
     renderFormImagePreviews();
 
     switchTab("add");
@@ -3748,29 +3979,43 @@
     }
   }
 
-  async function handlePullFromGitHub(isForcePull) {
+  async function handlePullFromGitHub(isForcePull, options) {
     if (state.isSyncing) return false;
-    const cfg = requireValidConfigOrRedirect();
+    const isAutoPull = Boolean(options && options.isAutoPull);
+    const cfg = isAutoPull
+      ? (function () {
+          const check = validateGitHubConfig(state.githubConfig);
+          return check.valid ? check.normalized : null;
+        })()
+      : requireValidConfigOrRedirect();
     if (!cfg) return false;
 
     setSyncButtonsDisabled(true);
     try {
-      showBanner("Đang tải dữ liệu mới nhất từ GitHub...", "info", {
-        autoHideMs: FETCH_TIMEOUT_MS + 1000
-      });
+      showBanner(
+        isAutoPull
+          ? "⚡ Auto Pull: Đang tự động tải dữ liệu mới nhất từ GitHub..."
+          : "Đang tải dữ liệu mới nhất từ GitHub...",
+        "info",
+        {
+          autoHideMs: FETCH_TIMEOUT_MS + 1000
+        }
+      );
       const currentRepoKey = buildRepoKey(cfg);
 
       const treeState = await githubGetBranchTreeState(cfg);
       if (treeState.supported) {
         const treePullRes = await githubPullFolderTree(cfg, treeState);
         if (treePullRes.status === 404) {
+          const nowIso = new Date().toISOString();
           if (isForcePull) {
             const prevTasks = state.tasks.slice();
             const prevMeta = Object.assign({}, state.syncMeta);
             state.tasks = [];
             state.syncMeta = {
               base_sha: null,
-              lastSyncAt: new Date().toISOString(),
+              lastSyncAt: nowIso,
+              lastPullAt: nowIso,
               syncedRepoKey: currentRepoKey,
               dirty: false,
               firstDirtyAt: null,
@@ -3796,6 +4041,14 @@
             );
             return true;
           }
+          if (isAutoPull) {
+            state.syncMeta.lastPullAt = nowIso;
+            try {
+              await persistAllToStorage();
+            } catch (_) {
+              // Bỏ qua lỗi lưu mốc kiểm tra 404 khi tự động Pull
+            }
+          }
           showBanner(
             "Dữ liệu chưa tồn tại trên GitHub (404). Bạn có thể nhấn 'Push GitHub' để khởi tạo cây thư mục mới.",
             "info"
@@ -3809,6 +4062,17 @@
           (state.tasks.length > 0 ||
             Boolean(state.syncMeta.base_sha) ||
             state.groups.join("\n") !== DEFAULT_GROUPS.join("\n"));
+
+        if (
+          !isForcePull &&
+          isAutoPull &&
+          (state.syncMeta.dirty ||
+            state.editAutoSaveTimerId !== null ||
+            state.editAutoSavePromise)
+        ) {
+          hideBanner(true);
+          return false;
+        }
 
         if (!isForcePull && hasLocalChanges) {
           const localLabel = state.syncMeta.base_sha
@@ -3827,12 +4091,14 @@
         const prevTasks = state.tasks;
         const prevGroups = state.groups;
         const prevMeta = state.syncMeta;
+        const nowIso = new Date().toISOString();
 
         state.tasks = treePullRes.tasks;
         state.groups = treePullRes.groups;
         state.syncMeta = {
           base_sha: remoteSha,
-          lastSyncAt: new Date().toISOString(),
+          lastSyncAt: nowIso,
+          lastPullAt: nowIso,
           syncedRepoKey: currentRepoKey,
           dirty: false,
           firstDirtyAt: null,
@@ -3860,7 +4126,9 @@
         showBanner(
           isForcePull
             ? `Force Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`
-            : `Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`,
+            : isAutoPull
+              ? `⚡ Auto Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`
+              : `Pull thành công (${state.tasks.length} công việc • ${state.groups.length} thư mục) — base_sha: ${remoteSha.slice(0, 7)}`,
           "success"
         );
         return true;
@@ -3869,13 +4137,15 @@
       const getRes = await githubGetFile(cfg);
 
       if (getRes.status === 404 || !getRes.data) {
+        const nowIso = new Date().toISOString();
         if (isForcePull) {
           const prevTasks = state.tasks.slice();
           const prevMeta = Object.assign({}, state.syncMeta);
           state.tasks = [];
           state.syncMeta = {
             base_sha: null,
-            lastSyncAt: new Date().toISOString(),
+            lastSyncAt: nowIso,
+            lastPullAt: nowIso,
             syncedRepoKey: currentRepoKey,
             dirty: false,
             firstDirtyAt: null,
@@ -3902,6 +4172,15 @@
           return true;
         }
 
+        if (isAutoPull) {
+          state.syncMeta.lastPullAt = nowIso;
+          try {
+            await persistAllToStorage();
+          } catch (_) {
+            // Bỏ qua lỗi lưu mốc kiểm tra 404 khi tự động Pull
+          }
+        }
+
         showBanner(
           "File chưa tồn tại trên GitHub (404). Bạn có thể nhấn 'Push GitHub' để khởi tạo file mới.",
           "info"
@@ -3910,6 +4189,17 @@
       }
 
       const remoteSha = String(getRes.data.sha || "");
+
+      if (
+        !isForcePull &&
+        isAutoPull &&
+        (state.syncMeta.dirty ||
+          state.editAutoSaveTimerId !== null ||
+          state.editAutoSavePromise)
+      ) {
+        hideBanner(true);
+        return false;
+      }
 
       if (!isForcePull && state.syncMeta.dirty && state.tasks.length > 0) {
         const localLabel = state.syncMeta.base_sha
@@ -3970,12 +4260,14 @@
       const prevTasks = state.tasks;
       const prevGroups = state.groups;
       const prevMeta = state.syncMeta;
+      const nowIso = new Date().toISOString();
 
       state.tasks = nextTasks;
       state.groups = nextGroups.length > 0 ? nextGroups : DEFAULT_GROUPS.slice();
       state.syncMeta = {
         base_sha: remoteSha,
-        lastSyncAt: new Date().toISOString(),
+        lastSyncAt: nowIso,
+        lastPullAt: nowIso,
         syncedRepoKey: currentRepoKey,
         dirty: false,
         firstDirtyAt: null,
@@ -4003,7 +4295,9 @@
       showBanner(
         isForcePull
           ? `Force Pull thành công (${state.tasks.length} công việc) — base_sha: ${remoteSha.slice(0, 7)}`
-          : `Pull thành công (${state.tasks.length} công việc) — base_sha: ${remoteSha.slice(0, 7)}`,
+          : isAutoPull
+            ? `⚡ Auto Pull thành công (${state.tasks.length} công việc) — base_sha: ${remoteSha.slice(0, 7)}`
+            : `Pull thành công (${state.tasks.length} công việc) — base_sha: ${remoteSha.slice(0, 7)}`,
         "success"
       );
       return true;
@@ -4014,6 +4308,30 @@
       setSyncButtonsDisabled(false);
       scheduleOrCancelAutoPush();
     }
+  }
+
+  async function triggerAutoPullOnOpen() {
+    if (state.autoPushConfig && state.autoPushConfig.autoPullOnOpen === false) {
+      return false;
+    }
+    if (state.isSyncing) {
+      return false;
+    }
+    if (state.syncMeta && state.syncMeta.dirty) {
+      return false;
+    }
+    const check = validateGitHubConfig(state.githubConfig);
+    if (!check.valid) {
+      return false;
+    }
+    const lastPullMs = parseTimestampSafe(state.syncMeta && state.syncMeta.lastPullAt);
+    const lastSyncMs = parseTimestampSafe(state.syncMeta && state.syncMeta.lastSyncAt);
+    const lastTimeMs = Math.max(lastPullMs, lastSyncMs);
+    const intervalMs = getAutoPullIntervalMs(state.autoPushConfig);
+    if (lastTimeMs > 0 && Date.now() - lastTimeMs < intervalMs) {
+      return false;
+    }
+    return await handlePullFromGitHub(false, { isAutoPull: true });
   }
 
   async function handlePushToGitHub(isForcePush, options) {
@@ -4199,11 +4517,13 @@
         state.syncMeta.dirty && (state.syncMeta.lastDirtyAt || 0) > pushStartedLastDirtyAt
       );
 
+      const nowIso = new Date().toISOString();
       if (editedDuringPush) {
         const latestEditTs = state.syncMeta.lastDirtyAt || Date.now();
         state.syncMeta = {
           base_sha: newSha || null,
-          lastSyncAt: new Date().toISOString(),
+          lastSyncAt: nowIso,
+          lastPullAt: nowIso,
           syncedRepoKey: currentRepoKey,
           dirty: true,
           firstDirtyAt: latestEditTs,
@@ -4214,7 +4534,8 @@
       } else {
         state.syncMeta = {
           base_sha: newSha || null,
-          lastSyncAt: new Date().toISOString(),
+          lastSyncAt: nowIso,
+          lastPullAt: nowIso,
           syncedRepoKey: currentRepoKey,
           dirty: false,
           firstDirtyAt: null,
@@ -4266,6 +4587,9 @@
     document.getElementById("ghTokenInput").value = state.githubConfig.token || "";
     document.getElementById("ghTokenInput").type = "password";
 
+    const apPullEnabledEl = document.getElementById("autoPullEnabledInput");
+    const apPullValEl = document.getElementById("autoPullIntervalValue");
+    const apPullUnitEl = document.getElementById("autoPullIntervalUnit");
     const apEnabledEl = document.getElementById("autoPushEnabledInput");
     const apDebValEl = document.getElementById("autoPushDebounceValue");
     const apDebUnitEl = document.getElementById("autoPushDebounceUnit");
@@ -4273,6 +4597,9 @@
     const apMaxUnitEl = document.getElementById("autoPushMaxWaitUnit");
     const launchModeEl = document.getElementById("launchModeSelect");
 
+    if (apPullEnabledEl) apPullEnabledEl.checked = state.autoPushConfig.autoPullOnOpen !== false;
+    if (apPullValEl) apPullValEl.value = String(state.autoPushConfig.autoPullIntervalValue || 5);
+    if (apPullUnitEl) apPullUnitEl.value = state.autoPushConfig.autoPullIntervalUnit === "s" ? "s" : "m";
     if (apEnabledEl) apEnabledEl.checked = Boolean(state.autoPushConfig.enabled);
     if (apDebValEl) apDebValEl.value = String(state.autoPushConfig.debounceValue || 10);
     if (apDebUnitEl) apDebUnitEl.value = state.autoPushConfig.debounceUnit === "m" ? "m" : "s";
@@ -4287,6 +4614,9 @@
     }
     if (state.isSyncing) return;
 
+    const apPullEnabledEl = document.getElementById("autoPullEnabledInput");
+    const apPullValEl = document.getElementById("autoPullIntervalValue");
+    const apPullUnitEl = document.getElementById("autoPullIntervalUnit");
     const apEnabledEl = document.getElementById("autoPushEnabledInput");
     const apDebValEl = document.getElementById("autoPushDebounceValue");
     const apDebUnitEl = document.getElementById("autoPushDebounceUnit");
@@ -4294,11 +4624,19 @@
     const apMaxUnitEl = document.getElementById("autoPushMaxWaitUnit");
     const launchModeEl = document.getElementById("launchModeSelect");
 
+    const rawPullInterval = Number(apPullValEl ? apPullValEl.value : 5);
     const rawDeb = Number(apDebValEl ? apDebValEl.value : 10);
     const rawMax = Number(apMaxValEl ? apMaxValEl.value : 5);
 
-    if (!Number.isFinite(rawDeb) || rawDeb < 1 || !Number.isFinite(rawMax) || rawMax < 1) {
-      showBanner("Thời gian Delay Auto Push phải là số dương lớn hơn hoặc bằng 1.", "error");
+    if (
+      !Number.isFinite(rawPullInterval) ||
+      rawPullInterval < 1 ||
+      !Number.isFinite(rawDeb) ||
+      rawDeb < 1 ||
+      !Number.isFinite(rawMax) ||
+      rawMax < 1
+    ) {
+      showBanner("Thời gian cấu hình Auto Pull / Auto Push phải là số dương lớn hơn hoặc bằng 1.", "error");
       return;
     }
 
@@ -4308,6 +4646,9 @@
 
     state.autoPushConfig = {
       enabled: apEnabledEl ? Boolean(apEnabledEl.checked) : true,
+      autoPullOnOpen: apPullEnabledEl ? Boolean(apPullEnabledEl.checked) : true,
+      autoPullIntervalValue: Math.max(1, Math.min(86400, Math.floor(rawPullInterval))),
+      autoPullIntervalUnit: apPullUnitEl && apPullUnitEl.value === "s" ? "s" : "m",
       debounceValue: Math.max(1, Math.min(86400, Math.floor(rawDeb))),
       debounceUnit: apDebUnitEl && apDebUnitEl.value === "m" ? "m" : "s",
       maxWaitValue: Math.max(1, Math.min(86400, Math.floor(rawMax))),
@@ -4329,7 +4670,7 @@
       await persistAllToStorage();
       populateSettingsFormFromState();
       renderAll();
-      showBanner("Đã lưu cấu hình Auto Push & Cửa sổ nổi!", "success");
+      showBanner("Đã lưu cấu hình Auto Pull, Auto Push & Cửa sổ nổi!", "success");
     } catch (err) {
       state.autoPushConfig = prevAp;
       state.launchMode = prevLaunch;
@@ -4387,6 +4728,7 @@
       state.syncMeta = {
         base_sha: null,
         lastSyncAt: null,
+        lastPullAt: null,
         syncedRepoKey: nextRepoKey,
         dirty: hasTasks,
         firstDirtyAt: hasTasks ? now : null,
@@ -4440,6 +4782,7 @@
     state.syncMeta = {
       base_sha: null,
       lastSyncAt: null,
+      lastPullAt: null,
       syncedRepoKey: null,
       dirty: false,
       firstDirtyAt: null,
@@ -4790,14 +5133,18 @@
       });
     }
 
-    document.getElementById("tabBtnTasks").addEventListener("click", () => switchTab("tasks"));
+    document.getElementById("tabBtnTasks").addEventListener("click", async () => {
+      await flushPendingEditAutoSave();
+      switchTab("tasks");
+    });
     document.getElementById("tabBtnAddTask").addEventListener("click", () => {
       switchTab("add");
       document.getElementById("taskTitleInput").focus();
     });
     const tabBtnGroups = document.getElementById("tabBtnGroups");
     if (tabBtnGroups) {
-      tabBtnGroups.addEventListener("click", () => {
+      tabBtnGroups.addEventListener("click", async () => {
+        await flushPendingEditAutoSave();
         state.editingGroupName = null;
         state.deletingGroupName = null;
         state.addingSubfolderParent = null;
@@ -4805,12 +5152,14 @@
         switchTab("groups");
       });
     }
-    document.getElementById("tabBtnSettings").addEventListener("click", () => {
+    document.getElementById("tabBtnSettings").addEventListener("click", async () => {
+      await flushPendingEditAutoSave();
       switchTab("settings");
       refreshUpdaterStatusUI();
     });
 
-    document.getElementById("btnQuickGoAdd").addEventListener("click", () => {
+    document.getElementById("btnQuickGoAdd").addEventListener("click", async () => {
+      await flushPendingEditAutoSave();
       resetTaskForm();
       switchTab("add");
       document.getElementById("taskTitleInput").focus();
@@ -4945,9 +5294,32 @@
     });
 
     document.getElementById("taskForm").addEventListener("submit", handleSaveTaskForm);
-    document.getElementById("btnCancelEdit").addEventListener("click", () => {
+    document.getElementById("btnCancelEdit").addEventListener("click", async () => {
+      await flushPendingEditAutoSave();
       resetTaskForm();
       switchTab("tasks");
+    });
+
+    document.getElementById("taskTitleInput").addEventListener("input", () => {
+      scheduleEditAutoSave();
+    });
+    document.getElementById("taskDescInput").addEventListener("input", () => {
+      scheduleEditAutoSave();
+    });
+    document.getElementById("taskGroupSelect").addEventListener("change", () => {
+      scheduleEditAutoSave();
+    });
+    document.getElementById("taskPrioritySelect").addEventListener("change", () => {
+      scheduleEditAutoSave();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        void flushPendingEditAutoSave();
+      }
+    });
+    window.addEventListener("pagehide", () => {
+      void flushPendingEditAutoSave();
     });
 
     document.getElementById("searchTaskInput").addEventListener("input", (ev) => {
@@ -5013,6 +5385,12 @@
     if (autoPushForm) {
       autoPushForm.addEventListener("submit", handleSavePreferences);
     }
+    const apPullCheckbox = document.getElementById("autoPullEnabledInput");
+    if (apPullCheckbox) {
+      apPullCheckbox.addEventListener("change", () => {
+        handleSavePreferences();
+      });
+    }
     const apEnabledCheckbox = document.getElementById("autoPushEnabledInput");
     if (apEnabledCheckbox) {
       apEnabledCheckbox.addEventListener("change", () => {
@@ -5029,7 +5407,8 @@
     document.getElementById("btnPullGitHub").addEventListener("click", () => {
       handlePullFromGitHub(false);
     });
-    document.getElementById("btnPushGitHub").addEventListener("click", () => {
+    document.getElementById("btnPushGitHub").addEventListener("click", async () => {
+      await flushPendingEditAutoSave();
       handlePushToGitHub(false);
     });
     document.getElementById("btnForcePull").addEventListener("click", () => {
@@ -5079,6 +5458,7 @@
       renderAll();
       scheduleOrCancelAutoPush();
       await checkLastExtUpdateNotice();
+      await triggerAutoPullOnOpen();
     } catch (err) {
       showBanner(err.message || "Không thể khởi tạo dữ liệu ứng dụng.", "error");
     }
