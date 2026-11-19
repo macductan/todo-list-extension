@@ -1861,13 +1861,15 @@
     prioLabelSpan.textContent = PRIORITY_META[prioKey].badgeLabel;
     prioBadge.appendChild(prioLabelSpan);
 
-    const statusBadge = document.createElement("span");
-    statusBadge.className = "badge badge-status";
-    statusBadge.textContent = task.status === "done" ? "✓ Đã xong" : "⏳ Chưa làm";
-
     metaRow.appendChild(groupBadge);
     metaRow.appendChild(prioBadge);
-    metaRow.appendChild(statusBadge);
+
+    if (task.status === "done") {
+      const statusBadge = document.createElement("span");
+      statusBadge.className = "badge badge-status";
+      statusBadge.textContent = "✓ Đã xong";
+      metaRow.appendChild(statusBadge);
+    }
 
     const validImages = Array.isArray(task.images)
       ? task.images.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
