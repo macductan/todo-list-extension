@@ -11,6 +11,7 @@
     none: { badgeLabel: "Không ưu tiên" }
   };
   const MAX_IMAGE_COUNT_PER_TASK = 6;
+  const MAX_ATTACHMENT_FILE_BYTES = Math.round(2.5 * 1024 * 1024);
   const MAX_SAFE_REMOTE_BYTES = 8 * 1024 * 1024;
   const FETCH_TIMEOUT_MS = 15000;
   const EDIT_AUTOSAVE_DEBOUNCE_MS = 400;
@@ -21,6 +22,12 @@
     "image/webp",
     "image/gif"
   ]);
+  const BLOCKED_ATTACHMENT_MIMES = new Set([
+    "image/svg+xml",
+    "text/html",
+    "application/xhtml+xml"
+  ]);
+  const BLOCKED_ATTACHMENT_EXTENSIONS = /\.(svg|svgz|html?|xhtml)$/i;
 
   /* ========================================================================
      1. CHROME.STORAGE.LOCAL WRAPPER
@@ -101,6 +108,76 @@
     const commaIdx = trimmed.indexOf(",");
     if (commaIdx === -1 || commaIdx + 1 >= trimmed.length) return false;
     return !/[^A-Za-z0-9+/=]/.test(trimmed.slice(commaIdx + 1));
+  }
+
+  function isBlockedAttachmentFile(file) {
+    if (!file) return true;
+    const mime = typeof file.type === "string" ? file.type.trim().toLowerCase() : "";
+    const name = typeof file.name === "string" ? file.name.trim() : "";
+    return BLOCKED_ATTACHMENT_MIMES.has(mime) || BLOCKED_ATTACHMENT_EXTENSIONS.test(name);
+  }
+
+  function isSafeAttachmentDataUrl(url) {
+    if (typeof url !== "string") return false;
+    const trimmed = url.trim();
+    const headerMatch = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+)?;base64,/i.exec(trimmed.slice(0, 128));
+    if (!headerMatch) return false;
+    const mime = (headerMatch[1] || "application/octet-stream").toLowerCase();
+    if (BLOCKED_ATTACHMENT_MIMES.has(mime)) return false;
+    const commaIdx = trimmed.indexOf(",");
+    if (commaIdx === -1 || commaIdx + 1 >= trimmed.length) return false;
+    return !/[^A-Za-z0-9+/=]/.test(trimmed.slice(commaIdx + 1));
+  }
+
+  function extractMimeFromDataUrl(url) {
+    const match = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,/i.exec(String(url || "").slice(0, 128));
+    return match ? match[1].toLowerCase() : "application/octet-stream";
+  }
+
+  function normalizeAttachmentItem(att, fallbackIndex) {
+    if (!att || typeof att !== "object" || !isSafeAttachmentDataUrl(att.dataUrl)) {
+      return null;
+    }
+    const trimmedUrl = att.dataUrl.trim();
+    const mimeType =
+      typeof att.mimeType === "string" && att.mimeType.trim()
+        ? att.mimeType.trim().toLowerCase()
+        : extractMimeFromDataUrl(trimmedUrl);
+    if (BLOCKED_ATTACHMENT_MIMES.has(mimeType)) {
+      return null;
+    }
+    return {
+      id:
+        typeof att.id === "string" && att.id.trim()
+          ? att.id.trim()
+          : `att-${Date.now()}-${fallbackIndex || 0}`,
+      name:
+        typeof att.name === "string" && att.name.trim()
+          ? att.name.trim()
+          : "attachment.bin",
+      mimeType,
+      size: typeof att.size === "number" && Number.isFinite(att.size) && att.size >= 0 ? att.size : 0,
+      dataUrl: trimmedUrl
+    };
+  }
+
+  function applyTaskAttachments(targetObj, images, attachments) {
+    const validImages = Array.isArray(images)
+      ? images.filter((img) => img && isSafeImageDataUrl(img.dataUrl)).slice(0, MAX_IMAGE_COUNT_PER_TASK)
+      : [];
+    const remainingSlots = Math.max(0, MAX_IMAGE_COUNT_PER_TASK - validImages.length);
+    const validAttachments = Array.isArray(attachments)
+      ? attachments
+          .map((att, idx) => normalizeAttachmentItem(att, idx))
+          .filter(Boolean)
+          .slice(0, remainingSlots)
+      : [];
+    if (validImages.length > 0) {
+      targetObj.images = validImages;
+    }
+    if (validAttachments.length > 0) {
+      targetObj.attachments = validAttachments;
+    }
   }
 
   function generateTaskId() {
@@ -232,6 +309,18 @@
       }
     }
 
+    if (Array.isArray(src.attachments)) {
+      const usedSlots = Array.isArray(cleanTask.images) ? cleanTask.images.length : 0;
+      const remainingSlots = Math.max(0, MAX_IMAGE_COUNT_PER_TASK - usedSlots);
+      const validAttachments = src.attachments
+        .map((att, i) => normalizeAttachmentItem(att, i))
+        .filter(Boolean)
+        .slice(0, remainingSlots);
+      if (validAttachments.length > 0) {
+        cleanTask.attachments = validAttachments;
+      }
+    }
+
     return cleanTask;
   }
 
@@ -269,12 +358,7 @@
       status: task.status === "done" ? "done" : "todo",
       updatedAt: String(task.updatedAt || new Date().toISOString())
     };
-    if (Array.isArray(task.images) && task.images.length > 0) {
-      const validImages = task.images.filter((img) => img && isSafeImageDataUrl(img.dataUrl));
-      if (validImages.length > 0) {
-        base.images = validImages;
-      }
-    }
+    applyTaskAttachments(base, task.images, task.attachments);
     return base;
   }
 
@@ -375,6 +459,134 @@
       };
       reader.readAsDataURL(file);
     });
+  }
+
+  function formatFileSizeLabel(bytes) {
+    if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  function getAttachmentFileIcon(mimeType, fileName) {
+    const mime = String(mimeType || "").toLowerCase();
+    const name = String(fileName || "").toLowerCase();
+    if (mime === "application/pdf" || name.endsWith(".pdf")) return "📄";
+    if (
+      mime.includes("word") ||
+      mime.includes("document") ||
+      /\.(docx?|rtf|odt)$/i.test(name)
+    ) {
+      return "📝";
+    }
+    if (
+      mime.includes("sheet") ||
+      mime.includes("excel") ||
+      mime === "text/csv" ||
+      /\.(xlsx?|csv|ods)$/i.test(name)
+    ) {
+      return "📊";
+    }
+    if (
+      mime.includes("presentation") ||
+      mime.includes("powerpoint") ||
+      /\.(pptx?|odp)$/i.test(name)
+    ) {
+      return "📽️";
+    }
+    if (
+      mime.includes("zip") ||
+      mime.includes("compressed") ||
+      mime.includes("archive") ||
+      /\.(zip|rar|7z|tar|gz)$/i.test(name)
+    ) {
+      return "📦";
+    }
+    if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|flac)$/i.test(name)) return "🎵";
+    if (mime.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) return "🎬";
+    if (
+      mime === "application/json" ||
+      mime.startsWith("text/") ||
+      /\.(txt|md|json|ya?ml|xml|log|ini|conf|js|ts|py|java|go|rs|css|sql)$/i.test(name)
+    ) {
+      return "📃";
+    }
+    return "📎";
+  }
+
+  function readAttachmentFileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      if (!file) {
+        reject(new Error("File đính kèm không hợp lệ."));
+        return;
+      }
+      if (isBlockedAttachmentFile(file)) {
+        reject(new Error(`Không hỗ trợ file "${file.name || ""}" (SVG/HTML) vì lý do bảo mật.`));
+        return;
+      }
+      if (typeof file.size === "number" && file.size > MAX_ATTACHMENT_FILE_BYTES) {
+        reject(
+          new Error(
+            `File "${file.name || "attachment"}" (${formatFileSizeLabel(file.size)}) vượt quá giới hạn 2.5 MB/file.`
+          )
+        );
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`Không thể đọc file "${file.name || ""}".`));
+      reader.onload = (ev) => {
+        let rawDataUrl = String(ev.target.result || "").trim();
+        if (/^data:;base64,/i.test(rawDataUrl)) {
+          rawDataUrl = "data:application/octet-stream;base64," + rawDataUrl.slice("data:;base64,".length);
+        }
+        if (!isSafeAttachmentDataUrl(rawDataUrl)) {
+          reject(new Error(`Định dạng file "${file.name || ""}" không hợp lệ hoặc không an toàn.`));
+          return;
+        }
+        const mimeType =
+          typeof file.type === "string" && file.type.trim()
+            ? file.type.trim().toLowerCase()
+            : extractMimeFromDataUrl(rawDataUrl);
+        resolve({
+          id: "att-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+          name: file.name || "attachment.bin",
+          mimeType,
+          size: typeof file.size === "number" ? file.size : 0,
+          dataUrl: rawDataUrl
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function downloadAttachmentFile(attObj) {
+    if (!attObj || !isSafeAttachmentDataUrl(attObj.dataUrl)) {
+      showBanner("Tệp đính kèm không hợp lệ để tải xuống.", "error");
+      return;
+    }
+    try {
+      const trimmed = attObj.dataUrl.trim();
+      const commaIdx = trimmed.indexOf(",");
+      const base64Part = trimmed.slice(commaIdx + 1);
+      const binaryStr = atob(base64Part);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i += 1) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], {
+        type: attObj.mimeType || extractMimeFromDataUrl(trimmed)
+      });
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = attObj.name || "attachment.bin";
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (_) {
+      showBanner("Không thể tải xuống tệp đính kèm.", "error");
+    }
   }
 
   function escapeHtmlText(raw) {
@@ -530,6 +742,7 @@
     deletingGroupName: null,
     addingSubfolderParent: null,
     pendingFormImages: [],
+    pendingFormAttachments: [],
     githubConfig: {
       owner: "",
       repo: "",
@@ -1451,7 +1664,8 @@
     const listEl = document.getElementById("formImagePreviewList");
     const countLbl = document.getElementById("imageCountLabel");
     clearChildren(listEl);
-    countLbl.textContent = `${state.pendingFormImages.length}/${MAX_IMAGE_COUNT_PER_TASK} ảnh đính kèm`;
+    const totalCount = state.pendingFormImages.length + state.pendingFormAttachments.length;
+    countLbl.textContent = `${totalCount}/${MAX_IMAGE_COUNT_PER_TASK} tệp đính kèm`;
 
     state.pendingFormImages.forEach((imgObj, index) => {
       if (!isSafeImageDataUrl(imgObj.dataUrl)) return;
@@ -1478,6 +1692,50 @@
       });
 
       wrap.appendChild(imgEl);
+      wrap.appendChild(btnDel);
+      listEl.appendChild(wrap);
+    });
+
+    state.pendingFormAttachments.forEach((attObj, index) => {
+      if (!isSafeAttachmentDataUrl(attObj.dataUrl)) return;
+      const wrap = document.createElement("div");
+      wrap.className = "file-preview-item";
+      wrap.title = `${attObj.name} (${formatFileSizeLabel(attObj.size)})`;
+
+      const iconEl = document.createElement("span");
+      iconEl.className = "file-preview-icon";
+      iconEl.textContent = getAttachmentFileIcon(attObj.mimeType, attObj.name);
+
+      const metaEl = document.createElement("div");
+      metaEl.className = "file-preview-meta";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "file-preview-name";
+      nameEl.textContent = attObj.name;
+
+      const sizeEl = document.createElement("span");
+      sizeEl.className = "file-preview-size";
+      sizeEl.textContent = formatFileSizeLabel(attObj.size);
+
+      metaEl.appendChild(nameEl);
+      metaEl.appendChild(sizeEl);
+
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "image-remove-btn";
+      btnDel.textContent = "✕";
+      btnDel.title = "Gỡ tệp đính kèm";
+      btnDel.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        state.pendingFormAttachments.splice(index, 1);
+        renderFormImagePreviews();
+        if (document.getElementById("taskEditId").value.trim()) {
+          scheduleEditAutoSave();
+        }
+      });
+
+      wrap.appendChild(iconEl);
+      wrap.appendChild(metaEl);
       wrap.appendChild(btnDel);
       listEl.appendChild(wrap);
     });
@@ -1874,12 +2132,22 @@
     const validImages = Array.isArray(task.images)
       ? task.images.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
       : [];
+    const validAttachments = Array.isArray(task.attachments)
+      ? task.attachments.map((att, idx) => normalizeAttachmentItem(att, idx)).filter(Boolean)
+      : [];
 
     if (validImages.length > 0) {
       const imgBadge = document.createElement("span");
       imgBadge.className = "badge badge-img";
       imgBadge.textContent = `🖼️ ${validImages.length} ảnh`;
       metaRow.appendChild(imgBadge);
+    }
+
+    if (validAttachments.length > 0) {
+      const fileBadge = document.createElement("span");
+      fileBadge.className = "badge badge-file";
+      fileBadge.textContent = `📎 ${validAttachments.length} tệp`;
+      metaRow.appendChild(fileBadge);
     }
 
     contentCol.appendChild(titleEl);
@@ -1933,6 +2201,44 @@
         imgGrid.appendChild(thumbWrap);
       });
       contentCol.appendChild(imgGrid);
+    }
+
+    if (validAttachments.length > 0) {
+      const attList = document.createElement("div");
+      attList.className = "task-attachments-list";
+      validAttachments.forEach((attObj) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "task-attachment-chip";
+        chip.title = `Tải xuống ${attObj.name} (${formatFileSizeLabel(attObj.size)})`;
+
+        const iconSpan = document.createElement("span");
+        iconSpan.textContent = getAttachmentFileIcon(attObj.mimeType, attObj.name);
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "task-attachment-name";
+        nameSpan.textContent = attObj.name;
+
+        const sizeSpan = document.createElement("span");
+        sizeSpan.className = "task-attachment-size";
+        sizeSpan.textContent = formatFileSizeLabel(attObj.size);
+
+        const dlSpan = document.createElement("span");
+        dlSpan.textContent = "⬇️";
+
+        chip.appendChild(iconSpan);
+        chip.appendChild(nameSpan);
+        chip.appendChild(sizeSpan);
+        chip.appendChild(dlSpan);
+
+        chip.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          downloadAttachmentFile(attObj);
+        });
+
+        attList.appendChild(chip);
+      });
+      contentCol.appendChild(attList);
     }
 
     const actionsCol = document.createElement("div");
@@ -2550,38 +2856,47 @@
      ======================================================================== */
   async function handleFilesSelected(fileList) {
     if (!fileList || fileList.length === 0) return;
-    const imageFiles = Array.from(fileList).filter(
-      (f) => f && typeof f.type === "string" && ALLOWED_IMAGE_MIMES.has(f.type.toLowerCase())
-    );
-    if (imageFiles.length === 0) {
-      showBanner("Vui lòng chỉ chọn file hình ảnh raster hợp lệ (PNG, JPG, WebP, GIF).", "error");
-      return;
-    }
+    const files = Array.from(fileList).filter(Boolean);
+    if (files.length === 0) return;
 
-    const remainingSlots = MAX_IMAGE_COUNT_PER_TASK - state.pendingFormImages.length;
+    const currentTotal = state.pendingFormImages.length + state.pendingFormAttachments.length;
+    const remainingSlots = MAX_IMAGE_COUNT_PER_TASK - currentTotal;
     if (remainingSlots <= 0) {
-      showBanner(`Mỗi công việc đính kèm tối đa ${MAX_IMAGE_COUNT_PER_TASK} ảnh.`, "error");
+      showBanner(`Mỗi công việc đính kèm tối đa ${MAX_IMAGE_COUNT_PER_TASK} tệp.`, "error");
       return;
     }
 
-    const toProcess = imageFiles.slice(0, remainingSlots);
+    const toProcess = files.slice(0, remainingSlots);
     let added = 0;
+    let lastErrorMsg = "";
     for (const file of toProcess) {
       try {
-        const compressed = await compressImageFileToDataUrl(file);
-        state.pendingFormImages.push(compressed);
+        const mime = typeof file.type === "string" ? file.type.trim().toLowerCase() : "";
+        if (ALLOWED_IMAGE_MIMES.has(mime)) {
+          const compressed = await compressImageFileToDataUrl(file);
+          state.pendingFormImages.push(compressed);
+        } else {
+          const attachment = await readAttachmentFileToDataUrl(file);
+          state.pendingFormAttachments.push(attachment);
+        }
         added++;
       } catch (err) {
-        showBanner(err.message || "Không thể xử lý ảnh đính kèm.", "error");
+        lastErrorMsg = err.message || "Không thể xử lý tệp đính kèm.";
       }
     }
 
     renderFormImagePreviews();
     if (added > 0) {
-      showBanner(`Đã đính kèm ${added} hình ảnh.`, "success");
+      const msg =
+        lastErrorMsg
+          ? `Đã đính kèm ${added} tệp (${lastErrorMsg})`
+          : `Đã đính kèm ${added} tệp.`;
+      showBanner(msg, lastErrorMsg ? "info" : "success");
       if (document.getElementById("taskEditId").value.trim()) {
         scheduleEditAutoSave();
       }
+    } else if (lastErrorMsg) {
+      showBanner(lastErrorMsg, "error");
     }
   }
 
@@ -2990,13 +3305,9 @@
     }
   }
 
-  function areTaskImageArraysEqual(arrA, arrB) {
-    const listA = Array.isArray(arrA)
-      ? arrA.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
-      : [];
-    const listB = Array.isArray(arrB)
-      ? arrB.filter((img) => img && isSafeImageDataUrl(img.dataUrl))
-      : [];
+  function areAttachmentArraysEqual(arrA, arrB, validatorFn) {
+    const listA = Array.isArray(arrA) ? arrA.filter((item) => item && validatorFn(item.dataUrl)) : [];
+    const listB = Array.isArray(arrB) ? arrB.filter((item) => item && validatorFn(item.dataUrl)) : [];
     if (listA.length !== listB.length) return false;
     for (let i = 0; i < listA.length; i += 1) {
       if (
@@ -3023,7 +3334,18 @@
     if ((task.group || "Công việc") !== group) return true;
     const taskPrio = VALID_PRIORITIES.includes(task.priority) ? task.priority : "none";
     if (taskPrio !== priority) return true;
-    if (!areTaskImageArraysEqual(state.pendingFormImages, task.images)) return true;
+    if (!areAttachmentArraysEqual(state.pendingFormImages, task.images, isSafeImageDataUrl)) {
+      return true;
+    }
+    if (
+      !areAttachmentArraysEqual(
+        state.pendingFormAttachments,
+        task.attachments,
+        isSafeAttachmentDataUrl
+      )
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -3054,9 +3376,6 @@
     const group = document.getElementById("taskGroupSelect").value.trim() || "Công việc";
     const rawPriority = document.getElementById("taskPrioritySelect").value.trim().toLowerCase();
     const priority = VALID_PRIORITIES.includes(rawPriority) ? rawPriority : "none";
-    const attachedImages = state.pendingFormImages
-      .filter((img) => img && isSafeImageDataUrl(img.dataUrl))
-      .slice(0, MAX_IMAGE_COUNT_PER_TASK);
 
     const prevTasksSnapshot = state.tasks.slice();
     const prevGroupsSnapshot = state.groups.slice();
@@ -3077,9 +3396,7 @@
       status: state.tasks[idx].status === "done" ? "done" : "todo",
       updatedAt: new Date().toISOString()
     };
-    if (attachedImages.length > 0) {
-      updated.images = attachedImages;
-    }
+    applyTaskAttachments(updated, state.pendingFormImages, state.pendingFormAttachments);
     state.tasks[idx] = updated;
     if (!description) {
       state.openDescriptions.delete(updated.id);
@@ -3164,6 +3481,7 @@
     document.getElementById("newGroupRow").classList.remove("open");
     document.getElementById("descInputContainer").classList.remove("collapsed");
     state.pendingFormImages = [];
+    state.pendingFormAttachments = [];
     document.getElementById("formModeTitle").textContent = "➕ Thêm công việc mới";
     document.getElementById("btnSubmitTask").textContent = "➕ Lưu Công Việc";
     renderFormImagePreviews();
@@ -3200,9 +3518,6 @@
     }
 
     const nowIso = new Date().toISOString();
-    const attachedImages = state.pendingFormImages
-      .filter((img) => img && isSafeImageDataUrl(img.dataUrl))
-      .slice(0, MAX_IMAGE_COUNT_PER_TASK);
 
     try {
       let bannerMsg = "Đã thêm công việc mới vào danh sách!";
@@ -3219,9 +3534,7 @@
             status: state.tasks[idx].status === "done" ? "done" : "todo",
             updatedAt: nowIso
           };
-          if (attachedImages.length > 0) {
-            updated.images = attachedImages;
-          }
+          applyTaskAttachments(updated, state.pendingFormImages, state.pendingFormAttachments);
           state.tasks[idx] = updated;
           if (!description) {
             state.openDescriptions.delete(updated.id);
@@ -3238,9 +3551,7 @@
             status: "todo",
             updatedAt: nowIso
           };
-          if (attachedImages.length > 0) {
-            restoredTask.images = attachedImages;
-          }
+          applyTaskAttachments(restoredTask, state.pendingFormImages, state.pendingFormAttachments);
           state.tasks.unshift(restoredTask);
           if (state.statusFilter === "done") {
             state.statusFilter = "todo";
@@ -3258,9 +3569,7 @@
           status: "todo",
           updatedAt: nowIso
         };
-        if (attachedImages.length > 0) {
-          newTask.images = attachedImages;
-        }
+        applyTaskAttachments(newTask, state.pendingFormImages, state.pendingFormAttachments);
         state.tasks.unshift(newTask);
         if (state.statusFilter === "done") {
           state.statusFilter = "todo";
@@ -3303,6 +3612,9 @@
 
     state.pendingFormImages = Array.isArray(task.images)
       ? task.images.map((img) => ({ id: img.id, name: img.name, dataUrl: img.dataUrl }))
+      : [];
+    state.pendingFormAttachments = Array.isArray(task.attachments)
+      ? task.attachments.map((att, idx) => normalizeAttachmentItem(att, idx)).filter(Boolean)
       : [];
 
     document.getElementById("formModeTitle").textContent = "✏️ Chỉnh sửa công việc";

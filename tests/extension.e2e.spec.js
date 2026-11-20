@@ -1262,7 +1262,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.setInputFiles("#taskImageInput", [
       { name: "bug-step1.png", mimeType: "image/png", buffer: Buffer.from(samplePngBuffers.img1) }
     ]);
-    await expect(page.locator("#imageCountLabel")).toContainText("1/6 ảnh đính kèm");
+    await expect(page.locator("#imageCountLabel")).toContainText("1/6 tệp đính kèm");
     await page.click("#btnSubmitTask");
 
     await page.click("#btnQuickGoAdd");
@@ -1272,7 +1272,7 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
       { name: "bug-step1.png", mimeType: "image/png", buffer: Buffer.from(samplePngBuffers.img1) },
       { name: "bug-step2.png", mimeType: "image/png", buffer: Buffer.from(samplePngBuffers.img2) }
     ]);
-    await expect(page.locator("#imageCountLabel")).toContainText("2/6 ảnh đính kèm");
+    await expect(page.locator("#imageCountLabel")).toContainText("2/6 tệp đính kèm");
     await page.click("#btnSubmitTask");
 
     // 3. Tạo vùng thử nghiệm Paste (cả Rich ContentEditable lẫn Plain Textarea) để kiểm tra dữ liệu thực trong Clipboard
@@ -2169,6 +2169,89 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
     await page.waitForTimeout(300);
     expect(remotePullCount).toBe(pullsBeforeDisabledReload);
     await expect(page.locator("#navTaskCount")).toHaveText("3");
+
+    assertCleanConsole();
+  });
+
+  test("13. Upload đa dạng loại file (PDF, TXT, JSON, ZIP + Ảnh), chặn SVG/HTML XSS, giới hạn 2.5MB & tải xuống", async () => {
+    const { page, assertCleanConsole } = await openExtensionPopupPage();
+
+    await page.click("#btnQuickGoAdd");
+    await page.fill("#taskTitleInput", "Task Đính Kèm Đa Dạng File");
+
+    // 1. Kiểm tra input không còn khóa accept chỉ mỗi ảnh
+    const acceptAttr = await page.locator("#taskImageInput").getAttribute("accept");
+    expect(acceptAttr).toBeNull();
+
+    // 2. Chặn SVG và HTML vì lý do bảo mật XSS
+    await page.setInputFiles("#taskImageInput", [
+      { name: "evil.svg", mimeType: "image/svg+xml", buffer: Buffer.from("<svg onload=alert(1)></svg>") }
+    ]);
+    await expect(page.locator("#statusBanner")).toContainText("SVG/HTML");
+    await expect(page.locator("#imageCountLabel")).toContainText("0/6 tệp đính kèm");
+
+    // 3. Chặn file vượt quá 2.5 MB
+    const oversizedBuf = Buffer.alloc(2.6 * 1024 * 1024, 65);
+    await page.setInputFiles("#taskImageInput", [
+      { name: "too-big.bin", mimeType: "application/octet-stream", buffer: oversizedBuf }
+    ]);
+    await expect(page.locator("#statusBanner")).toContainText("2.5 MB");
+    await expect(page.locator("#imageCountLabel")).toContainText("0/6 tệp đính kèm");
+
+    // 4. Tạo 1 ảnh PNG + 3 file khác (PDF, TXT, JSON)
+    const pngBytes = await page.evaluate(async () => {
+      const c = document.createElement("canvas");
+      c.width = 40;
+      c.height = 40;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#3b82f6";
+      ctx.fillRect(0, 0, 40, 40);
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    });
+
+    await page.setInputFiles("#taskImageInput", [
+      { name: "preview.png", mimeType: "image/png", buffer: Buffer.from(pngBytes) },
+      { name: "spec.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%test\n") },
+      { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Ghi chu tieng Viet") },
+      { name: "config.json", mimeType: "application/json", buffer: Buffer.from('{"ok":true}') }
+    ]);
+
+    await expect(page.locator("#imageCountLabel")).toContainText("4/6 tệp đính kèm");
+    await expect(page.locator("#formImagePreviewList .image-preview-item")).toHaveCount(1);
+    await expect(page.locator("#formImagePreviewList .file-preview-item")).toHaveCount(3);
+
+    // Gỡ 1 file (config.json) trước khi lưu
+    await page.locator("#formImagePreviewList .file-preview-item").last().locator(".image-remove-btn").click();
+    await expect(page.locator("#imageCountLabel")).toContainText("3/6 tệp đính kèm");
+    await expect(page.locator("#formImagePreviewList .file-preview-item")).toHaveCount(2);
+
+    await page.click("#btnSubmitTask");
+
+    // 5. Mở nhóm mặc định & kiểm tra thẻ công việc hiển thị cả ảnh lẫn file đính kèm
+    await page.locator('.group-section[data-group-name="Công việc"] .group-header').click();
+    const card = page.locator(".task-card", { hasText: "Task Đính Kèm Đa Dạng File" });
+    await expect(card.locator(".badge-img")).toContainText("1 ảnh");
+    await expect(card.locator(".badge-file")).toContainText("2 tệp");
+    await expect(card.locator(".task-img-thumb")).toHaveCount(1);
+    await expect(card.locator(".task-attachment-chip")).toHaveCount(2);
+    await expect(card.locator(".task-attachment-chip").nth(0)).toContainText("spec.pdf");
+    await expect(card.locator(".task-attachment-chip").nth(1)).toContainText("notes.txt");
+
+    // 6. Kiểm tra tải xuống file đính kèm khi bấm vào chip
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      card.locator(".task-attachment-chip", { hasText: "notes.txt" }).click()
+    ]);
+    expect(download.suggestedFilename()).toBe("notes.txt");
+    const dlPath = await download.path();
+    expect(fs.readFileSync(dlPath, "utf8")).toBe("Ghi chu tieng Viet");
+
+    // 7. Reload trang kiểm tra lưu trữ bền vững trong chrome.storage.local
+    await page.reload();
+    await page.locator('.group-section[data-group-name="Công việc"] .group-header').click();
+    const reloadedCard = page.locator(".task-card", { hasText: "Task Đính Kèm Đa Dạng File" });
+    await expect(reloadedCard.locator(".task-attachment-chip")).toHaveCount(2);
 
     assertCleanConsole();
   });

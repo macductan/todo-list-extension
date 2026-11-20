@@ -1252,6 +1252,15 @@ body.fulltab-mode .extension-viewport {
   color: #059669;
 }
 
+.badge-file {
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+}
+
+[data-theme="light"] .badge-file {
+  color: #0284c7;
+}
+
 .badge-status {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -1618,6 +1627,93 @@ body.fulltab-mode .extension-viewport {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.file-preview-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 210px;
+  padding: 6px 28px 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.file-preview-icon {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.file-preview-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.file-preview-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-preview-size {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.file-preview-item .image-remove-btn {
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+}
+
+.task-attachments-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.task-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.task-attachment-chip:hover {
+  border-color: var(--border-focus);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.task-attachment-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.task-attachment-size {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .task-img-thumb-wrap {
