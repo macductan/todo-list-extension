@@ -2255,4 +2255,323 @@ test.describe("GitTask Sync — Chrome Extension Manifest V3 Headless E2E Suite"
 
     assertCleanConsole();
   });
+
+  test("14. Bố cục dạng lưới (Grid) hiển thị nhiều task & giữ nguyên vị trí cuộn khi tích, sửa, xóa, đóng mở mô tả", async () => {
+    const { page, assertCleanConsole } = await openExtensionPopupPage();
+    await page.setViewportSize({ width: 780, height: 600 });
+
+    const seededTasks = Array.from({ length: 20 }, (_, i) => ({
+      id: `grid-task-${i + 1}`,
+      title: `Công việc Grid #${String(i + 1).padStart(2, "0")}`,
+      description: i % 2 === 0 ? `Mô tả chi tiết cho task ${i + 1}` : "",
+      group: "Công việc",
+      priority: i < 4 ? "high" : i < 10 ? "medium" : i < 16 ? "low" : "none",
+      status: "todo",
+      updatedAt: new Date(Date.now() - i * 1000).toISOString()
+    }));
+    seededTasks.push(
+      {
+        id: "grid-sub-1",
+        title: "Subfolder Task 1",
+        description: "",
+        group: "Công việc/Con",
+        priority: "medium",
+        status: "todo",
+        updatedAt: new Date().toISOString()
+      },
+      {
+        id: "grid-sub-2",
+        title: "Subfolder Task 2",
+        description: "",
+        group: "Công việc/Con",
+        priority: "low",
+        status: "todo",
+        updatedAt: new Date().toISOString()
+      }
+    );
+
+    await page.evaluate((tasks) => {
+      return new Promise((resolve) => {
+        chrome.storage.local.set(
+          {
+            tasks,
+            groups: ["Công việc", "Công việc/Con", "Dự án GitHub", "Cá nhân", "Khẩn cấp"]
+          },
+          resolve
+        );
+      });
+    }, seededTasks);
+
+    await page.reload();
+    const workSection = page.locator('.group-section[data-group-name="Công việc"]');
+    await workSection.locator("> .group-header").click();
+
+    const gridEl = workSection.locator("> .group-section-body > .task-cards-grid");
+    await expect(gridEl).toBeVisible();
+    const gridDisplay = await gridEl.evaluate((el) => window.getComputedStyle(el).display);
+    expect(gridDisplay).toBe("grid");
+
+    // 1. Ở popup mặc định 780x600 -> hiển thị 2 cột trong lưới, thư mục con nằm full width bên dưới
+    const popupColsInfo = await workSection.evaluate((sec) => {
+      const cards = Array.from(
+        sec.querySelectorAll(":scope > .group-section-body > .task-cards-grid > .task-card")
+      );
+      const firstRowTop = cards[0].getBoundingClientRect().top;
+      const firstRowCards = cards.filter(
+        (c) => Math.abs(c.getBoundingClientRect().top - firstRowTop) <= 2
+      );
+      const gridRect = sec
+        .querySelector(":scope > .group-section-body > .task-cards-grid")
+        .getBoundingClientRect();
+      const subSectionRect = sec
+        .querySelector('.group-section-nested[data-group-name="Công việc/Con"]')
+        .getBoundingClientRect();
+      return {
+        firstRowCount: firstRowCards.length,
+        subStartsBelowGrid: subSectionRect.top >= gridRect.bottom - 2,
+        subWidthMatchesGrid: Math.abs(subSectionRect.width - gridRect.width) <= 4
+      };
+    });
+    expect(popupColsInfo.firstRowCount).toBe(2);
+    expect(popupColsInfo.subStartsBelowGrid).toBe(true);
+    expect(popupColsInfo.subWidthMatchesGrid).toBe(true);
+
+    // 2. Cuộn xuống giữa/cuối danh sách -> đóng/mở mô tả, tích hoàn thành, xóa, sửa & quay lại không bị nhảy lên đầu
+    await page.locator("main.ext-body").evaluate((el) => {
+      el.scrollTop = 300;
+    });
+    const initialScrollTop = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(initialScrollTop).toBeGreaterThanOrEqual(240);
+
+    // Đóng/mở mô tả ở task phía dưới
+    const card15 = page.locator('.task-card[data-task-id="grid-task-15"]');
+    await card15.locator(".btn-toggle-desc").click();
+    await expect(card15.locator(".task-desc-box")).toBeVisible();
+    const scrollAfterDescToggle = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(scrollAfterDescToggle).toBeGreaterThanOrEqual(200);
+
+    // Tích hoàn thành ở task phía dưới
+    const card16 = page.locator('.task-card[data-task-id="grid-task-16"]');
+    await card16.locator(".task-checkbox").click();
+    await expect(page.locator("#countDoneBadge")).toHaveText("1");
+    const scrollAfterTick = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(scrollAfterTick).toBeGreaterThanOrEqual(200);
+
+    // Xóa task phía dưới
+    const card18 = page.locator('.task-card[data-task-id="grid-task-18"]');
+    await card18.locator(".btn-delete-task").click();
+    await expect(page.locator("#navTaskCount")).toHaveText("21");
+    const scrollAfterDelete = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(scrollAfterDelete).toBeGreaterThanOrEqual(200);
+
+    // Sửa task phía dưới -> Lưu cập nhật -> quay lại màn Công việc giữ nguyên vị trí cuộn
+    const card17 = page.locator('.task-card[data-task-id="grid-task-17"]');
+    await card17.locator(".btn-edit-task").click();
+    await expect(page.locator("#viewAddTask")).toHaveClass(/active/);
+    await page.fill("#taskTitleInput", "Công việc Grid #17 Đã Cập Nhật");
+    await page.click("#btnSubmitTask");
+    await expect(page.locator("#viewTasks")).toHaveClass(/active/);
+    await expect(page.locator(".task-card", { hasText: "Công việc Grid #17 Đã Cập Nhật" })).toBeVisible();
+    const scrollAfterEditSave = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(scrollAfterEditSave).toBeGreaterThanOrEqual(200);
+
+    // Mở Sửa -> bấm Quay lại (Cancel) -> giữ nguyên vị trí cuộn
+    await page
+      .locator(".task-card", { hasText: "Công việc Grid #17 Đã Cập Nhật" })
+      .locator(".btn-edit-task")
+      .click();
+    await page.click("#btnCancelEdit");
+    await expect(page.locator("#viewTasks")).toHaveClass(/active/);
+    const scrollAfterCancel = await page.locator("main.ext-body").evaluate((el) => el.scrollTop);
+    expect(scrollAfterCancel).toBeGreaterThanOrEqual(200);
+
+    // 3. Kiểm tra số cột tăng lên ở Floating Window (960x640 -> 3 cột) & Full Tab (1280x720 -> 4 cột)
+    const winPage = await context.newPage();
+    await winPage.setViewportSize({ width: 960, height: 640 });
+    await winPage.goto(`chrome-extension://${extensionId}/popup.html?mode=window`);
+    const winWorkSection = winPage.locator('.group-section[data-group-name="Công việc"]');
+    await winWorkSection.locator("> .group-header").click();
+    const winFirstRowCols = await winWorkSection.evaluate((sec) => {
+      const cards = Array.from(
+        sec.querySelectorAll(":scope > .group-section-body > .task-cards-grid > .task-card")
+      );
+      const top = cards[0].getBoundingClientRect().top;
+      return cards.filter((c) => Math.abs(c.getBoundingClientRect().top - top) <= 2).length;
+    });
+    expect(winFirstRowCols).toBe(3);
+    await winPage.close();
+
+    const tabPage = await context.newPage();
+    await tabPage.setViewportSize({ width: 1280, height: 720 });
+    await tabPage.goto(`chrome-extension://${extensionId}/popup.html?mode=tab`);
+    const tabWorkSection = tabPage.locator('.group-section[data-group-name="Công việc"]');
+    await tabWorkSection.locator("> .group-header").click();
+    const tabFirstRowCols = await tabWorkSection.evaluate((sec) => {
+      const cards = Array.from(
+        sec.querySelectorAll(":scope > .group-section-body > .task-cards-grid > .task-card")
+      );
+      const top = cards[0].getBoundingClientRect().top;
+      return cards.filter((c) => Math.abs(c.getBoundingClientRect().top - top) <= 2).length;
+    });
+    expect(tabFirstRowCols).toBe(4);
+    await tabPage.close();
+
+    assertCleanConsole();
+  });
+
+  test("15. Nút gom nhóm theo Folder và theo Flag (4 chế độ kết hợp, đóng/mở Flag & lưu bền vững)", async () => {
+    const { page, assertCleanConsole } = await openExtensionPopupPage();
+    await page.setViewportSize({ width: 780, height: 600 });
+
+    const seededTasks = [
+      {
+        id: "gf-1",
+        title: "Work High Task",
+        description: "",
+        group: "Công việc",
+        priority: "high",
+        status: "todo",
+        updatedAt: "2026-11-25T09:00:00.000Z"
+      },
+      {
+        id: "gf-2",
+        title: "Work Medium Task",
+        description: "",
+        group: "Công việc",
+        priority: "medium",
+        status: "todo",
+        updatedAt: "2026-11-25T08:50:00.000Z"
+      },
+      {
+        id: "gf-3",
+        title: "Work Low Task",
+        description: "",
+        group: "Công việc",
+        priority: "low",
+        status: "todo",
+        updatedAt: "2026-11-25T08:40:00.000Z"
+      },
+      {
+        id: "gf-4",
+        title: "Work None Task",
+        description: "",
+        group: "Công việc",
+        priority: "none",
+        status: "todo",
+        updatedAt: "2026-11-25T08:30:00.000Z"
+      },
+      {
+        id: "gf-5",
+        title: "GitHub High Task",
+        description: "",
+        group: "Dự án GitHub",
+        priority: "high",
+        status: "todo",
+        updatedAt: "2026-11-25T08:20:00.000Z"
+      },
+      {
+        id: "gf-6",
+        title: "Personal Low Task",
+        description: "",
+        group: "Cá nhân",
+        priority: "low",
+        status: "todo",
+        updatedAt: "2026-11-25T08:10:00.000Z"
+      }
+    ];
+
+    await page.evaluate((tasks) => {
+      return new Promise((resolve) => {
+        chrome.storage.local.set({ tasks }, resolve);
+      });
+    }, seededTasks);
+    await page.reload();
+
+    const btnFolder = page.locator("#btnGroupByFolder");
+    const btnFlag = page.locator("#btnGroupByFlag");
+
+    // Mặc định: Folder BẬT, Flag TẮT
+    await expect(btnFolder).toHaveClass(/active/);
+    await expect(btnFolder).toHaveAttribute("aria-pressed", "true");
+    await expect(btnFlag).not.toHaveClass(/active/);
+    await expect(btnFlag).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".group-section")).toHaveCount(4);
+    await expect(page.locator(".priority-section")).toHaveCount(0);
+
+    // 1) Chế độ Folder + Flag: Bật thêm Flag
+    await btnFlag.click();
+    await expect(btnFlag).toHaveClass(/active/);
+    await expect(btnFlag).toHaveAttribute("aria-pressed", "true");
+
+    const workSection = page.locator('.group-section[data-group-name="Công việc"]');
+    await workSection.locator("> .group-header").click();
+
+    const nestedPrios = await workSection
+      .locator(".priority-section")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-priority-group")));
+    expect(nestedPrios).toEqual(["high", "medium", "low", "none"]);
+
+    const nestedGridDisplay = await workSection
+      .locator('.priority-section[data-priority-group="high"] .task-cards-grid')
+      .evaluate((el) => window.getComputedStyle(el).display);
+    expect(nestedGridDisplay).toBe("grid");
+
+    // Đóng / mở nhóm Flag bên trong Folder
+    const workHighPrio = workSection.locator('.priority-section[data-priority-group="high"]');
+    await workHighPrio.locator(".priority-header").click();
+    await expect(workHighPrio.locator(".priority-header")).toHaveAttribute("aria-expanded", "false");
+    await expect(workHighPrio.locator(".priority-section-body")).toBeHidden();
+    await workHighPrio.locator(".priority-header").click();
+    await expect(workHighPrio.locator(".priority-header")).toHaveAttribute("aria-expanded", "true");
+    await expect(workHighPrio.locator(".priority-section-body")).toBeVisible();
+
+    // 2) Chế độ chỉ Flag: Tắt Folder (Flag vẫn BẬT)
+    await btnFolder.click();
+    await expect(btnFolder).not.toHaveClass(/active/);
+    await expect(btnFolder).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".group-section")).toHaveCount(0);
+
+    const topLevelPrios = await page
+      .locator("#taskListContainer > .priority-section")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-priority-group")));
+    expect(topLevelPrios).toEqual(["high", "medium", "low", "none"]);
+
+    const highGroupTitles = await page
+      .locator('.priority-section[data-priority-group="high"] .task-cards-grid .task-title')
+      .allTextContents();
+    expect(highGroupTitles).toEqual(["Work High Task", "GitHub High Task"]);
+
+    // Reload giữ nguyên chế độ gom nhóm đã chọn
+    await page.reload();
+    await expect(btnFolder).not.toHaveClass(/active/);
+    await expect(btnFlag).toHaveClass(/active/);
+    await expect(page.locator(".group-section")).toHaveCount(0);
+    await expect(page.locator("#taskListContainer > .priority-section")).toHaveCount(4);
+
+    // 3) Chế độ Lưới phẳng (tắt cả Folder & Flag)
+    await btnFlag.click();
+    await expect(btnFlag).not.toHaveClass(/active/);
+    await expect(page.locator(".group-section")).toHaveCount(0);
+    await expect(page.locator(".priority-section")).toHaveCount(0);
+
+    const flatTitles = await page
+      .locator("#taskListContainer > .task-cards-grid > .task-card .task-title")
+      .allTextContents();
+    expect(flatTitles).toEqual([
+      "Work High Task",
+      "GitHub High Task",
+      "Work Medium Task",
+      "Work Low Task",
+      "Personal Low Task",
+      "Work None Task"
+    ]);
+
+    // 4) Bật lại Folder -> trở về chế độ mặc định theo Folder
+    await btnFolder.click();
+    await expect(btnFolder).toHaveClass(/active/);
+    await expect(page.locator(".group-section")).toHaveCount(4);
+    await expect(page.locator(".priority-section")).toHaveCount(0);
+
+    assertCleanConsole();
+  });
 });

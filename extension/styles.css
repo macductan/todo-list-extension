@@ -675,6 +675,7 @@ body.fulltab-mode .extension-viewport {
 .ext-body {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 14px 18px;
   display: flex;
   flex-direction: column;
@@ -808,6 +809,44 @@ body.fulltab-mode .extension-viewport {
   background: var(--accent-primary);
   color: #ffffff;
   border-color: var(--accent-primary);
+}
+
+.group-mode-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-input);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.group-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.group-toggle-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
+.group-toggle-btn.active {
+  background: var(--accent-primary);
+  color: #ffffff;
 }
 
 .status-segment {
@@ -1101,6 +1140,19 @@ body.fulltab-mode .extension-viewport {
   gap: 8px;
 }
 
+.task-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+@media (max-width: 540px) {
+  .task-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .empty-state-box {
   padding: 32px 16px;
   text-align: center;
@@ -1114,16 +1166,36 @@ body.fulltab-mode .extension-viewport {
 .task-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
+  border-left-width: 3px;
   border-radius: var(--radius-md);
-  padding: 11px 13px;
+  padding: 9px 11px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+
+.task-card[data-priority="high"] {
+  border-left-color: #ef4444;
+}
+
+.task-card[data-priority="medium"] {
+  border-left-color: #f59e0b;
+}
+
+.task-card[data-priority="low"] {
+  border-left-color: #10b981;
+}
+
+.task-card[data-priority="none"] {
+  border-left-color: var(--border-subtle);
 }
 
 .task-card:hover {
   border-color: var(--accent-primary);
+  background: var(--bg-card-hover);
 }
 
 .task-card.done {
@@ -1134,12 +1206,13 @@ body.fulltab-mode .extension-viewport {
 .task-main-row {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .task-checkbox {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   margin-top: 2px;
   accent-color: var(--accent-primary);
   cursor: pointer;
@@ -1152,8 +1225,9 @@ body.fulltab-mode .extension-viewport {
 }
 
 .task-title {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.35;
   color: var(--text-primary);
   word-break: break-word;
 }
@@ -1167,24 +1241,29 @@ body.fulltab-mode .extension-viewport {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   margin-top: 5px;
 }
 
 .badge {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 1.5px 6px;
   border-radius: 5px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+  max-width: 100%;
 }
 
 .badge-group {
   background: rgba(59, 130, 246, 0.12);
   color: #60a5fa;
   border: 1px solid rgba(59, 130, 246, 0.28);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
 }
 
 [data-theme="light"] .badge-group {
@@ -1270,7 +1349,12 @@ body.fulltab-mode .extension-viewport {
 .task-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 3px;
+  margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
   flex-shrink: 0;
 }
 
@@ -1278,11 +1362,12 @@ body.fulltab-mode .extension-viewport {
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-secondary);
-  padding: 4px 7px;
-  border-radius: 6px;
+  padding: 3px 6px;
+  border-radius: 5px;
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: 11px;
   font-family: var(--font-sans);
+  white-space: nowrap;
   transition: all 0.15s ease;
 }
 
@@ -1301,8 +1386,8 @@ body.fulltab-mode .extension-viewport {
 
 .task-desc-box {
   display: none;
-  margin-top: 3px;
-  padding: 7px 11px;
+  margin-top: 0;
+  padding: 6px 9px;
   background: var(--bg-input);
   border-radius: 6px;
   border-left: 3px solid var(--accent-primary);
@@ -1317,8 +1402,8 @@ body.fulltab-mode .extension-viewport {
 
 .task-desc-text {
   width: 100%;
-  font-size: 12.5px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--text-secondary);
   word-break: break-word;
   white-space: pre-line;
@@ -1590,8 +1675,8 @@ body.fulltab-mode .extension-viewport {
 .task-images-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+  gap: 6px;
+  margin-top: 5px;
 }
 
 .image-preview-item {
@@ -1687,13 +1772,13 @@ body.fulltab-mode .extension-viewport {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 220px;
-  padding: 4px 8px;
+  max-width: 100%;
+  padding: 3px 7px;
   border-radius: 6px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 11.5px;
+  font-size: 11px;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
@@ -1718,14 +1803,14 @@ body.fulltab-mode .extension-viewport {
 
 .task-img-thumb-wrap {
   position: relative;
-  width: 64px;
-  height: 64px;
+  width: 54px;
+  height: 54px;
   display: inline-block;
 }
 
 .task-img-thumb {
-  width: 64px;
-  height: 64px;
+  width: 54px;
+  height: 54px;
   border-radius: 7px;
   object-fit: cover;
   border: 1px solid var(--border-subtle);
@@ -1741,15 +1826,15 @@ body.fulltab-mode .extension-viewport {
 
 .thumb-copy-btn {
   position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   background: rgba(15, 23, 42, 0.86);
   border: 1px solid rgba(148, 163, 184, 0.45);
   color: #f8fafc;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
   cursor: pointer;
   display: flex;

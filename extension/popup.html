@@ -119,6 +119,27 @@
             />
           </div>
 
+          <div class="group-mode-toggles" role="group" aria-label="Gom nhóm công việc">
+            <button
+              type="button"
+              class="group-toggle-btn active"
+              id="btnGroupByFolder"
+              aria-pressed="true"
+              title="Bật/tắt gom nhóm công việc theo Thư mục (Folder)"
+            >
+              📁 Folder
+            </button>
+            <button
+              type="button"
+              class="group-toggle-btn"
+              id="btnGroupByFlag"
+              aria-pressed="false"
+              title="Bật/tắt gom nhóm công việc theo Cờ ưu tiên (Flag)"
+            >
+              🚩 Flag
+            </button>
+          </div>
+
           <div class="status-segment" role="group" aria-label="Lọc theo trạng thái">
             <button type="button" class="status-seg-btn active" data-statusfilter="todo" id="segBtnTodo">
               ⏳ Chưa làm (<span id="countTodoBadge">0</span>)

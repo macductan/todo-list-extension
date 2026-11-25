@@ -3,12 +3,13 @@
 
   const DEFAULT_GROUPS = ["Công việc", "Dự án GitHub", "Cá nhân", "Khẩn cấp"];
   const VALID_PRIORITIES = ["none", "low", "medium", "high"];
+  const PRIORITY_ORDER = ["high", "medium", "low", "none"];
   const PRIO_WEIGHT = { high: 3, medium: 2, low: 1, none: 0 };
   const PRIORITY_META = {
-    high: { badgeLabel: "High" },
-    medium: { badgeLabel: "Medium" },
-    low: { badgeLabel: "Low" },
-    none: { badgeLabel: "Không ưu tiên" }
+    high: { badgeLabel: "High", sectionLabel: "Ưu tiên Cao (High)" },
+    medium: { badgeLabel: "Medium", sectionLabel: "Ưu tiên Trung bình (Medium)" },
+    low: { badgeLabel: "Low", sectionLabel: "Ưu tiên Thấp (Low)" },
+    none: { badgeLabel: "Không ưu tiên", sectionLabel: "Không ưu tiên" }
   };
   const MAX_IMAGE_COUNT_PER_TASK = 6;
   const MAX_ATTACHMENT_FILE_BYTES = Math.round(2.5 * 1024 * 1024);
@@ -730,13 +731,23 @@
   const state = {
     tasks: [],
     groups: DEFAULT_GROUPS.slice(),
+    activeTab: "tasks",
+    viewScrollPositions: {
+      tasks: 0,
+      add: 0,
+      groups: 0,
+      settings: 0
+    },
     statusFilter: "todo",
+    groupByFolder: true,
+    groupByFlag: false,
     searchQuery: "",
     theme: "dark",
     launchMode: "window",
     openDescriptions: new Set(),
     expandedDescriptions: new Set(),
     expandedCategoryGroups: new Set(),
+    collapsedPriorityGroups: new Set(),
     clearDoneCutoffDate: getDefaultClearCutoffDateString(),
     editingGroupName: null,
     deletingGroupName: null,
@@ -1185,6 +1196,12 @@
       } else {
         state.launchMode = "window";
       }
+      if (typeof stored.uiPrefs.groupByFolder === "boolean") {
+        state.groupByFolder = stored.uiPrefs.groupByFolder;
+      }
+      if (typeof stored.uiPrefs.groupByFlag === "boolean") {
+        state.groupByFlag = stored.uiPrefs.groupByFlag;
+      }
     }
 
     applyThemeToDocument();
@@ -1258,7 +1275,9 @@
         syncMeta: state.syncMeta,
         uiPrefs: {
           theme: state.theme,
-          preferredLaunchMode: state.launchMode
+          preferredLaunchMode: state.launchMode,
+          groupByFolder: state.groupByFolder,
+          groupByFlag: state.groupByFlag
         }
       });
       updateHeaderAndFooterMeta();
@@ -1276,7 +1295,25 @@
     }
   }
 
+  function getMainScrollContainer() {
+    return document.querySelector(".ext-body");
+  }
+
+  function restoreScrollTop(scrollEl, targetTop) {
+    if (!scrollEl) return;
+    const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    const numericTop =
+      typeof targetTop === "number" && Number.isFinite(targetTop) ? targetTop : 0;
+    scrollEl.scrollTop = Math.min(Math.max(0, numericTop), maxScroll);
+  }
+
   function switchTab(tabName) {
+    const scrollEl = getMainScrollContainer();
+    if (scrollEl && state.activeTab && state.activeTab !== tabName) {
+      state.viewScrollPositions[state.activeTab] = scrollEl.scrollTop;
+    }
+    state.activeTab = tabName;
+
     document.getElementById("tabBtnTasks").classList.toggle("active", tabName === "tasks");
     document.getElementById("tabBtnAddTask").classList.toggle("active", tabName === "add");
     const grpTabBtn = document.getElementById("tabBtnGroups");
@@ -1291,6 +1328,14 @@
 
     if (tabName === "tasks") {
       refreshDescriptionOverflowButtons();
+    }
+
+    if (scrollEl) {
+      if (tabName === "add") {
+        scrollEl.scrollTop = 0;
+      } else {
+        restoreScrollTop(scrollEl, state.viewScrollPositions[tabName] || 0);
+      }
     }
   }
 
@@ -2053,6 +2098,17 @@
       statusSelectEl.value = state.statusFilter;
     }
 
+    const btnGroupFolder = document.getElementById("btnGroupByFolder");
+    if (btnGroupFolder) {
+      btnGroupFolder.classList.toggle("active", Boolean(state.groupByFolder));
+      btnGroupFolder.setAttribute("aria-pressed", state.groupByFolder ? "true" : "false");
+    }
+    const btnGroupFlag = document.getElementById("btnGroupByFlag");
+    if (btnGroupFlag) {
+      btnGroupFlag.classList.toggle("active", Boolean(state.groupByFlag));
+      btnGroupFlag.setAttribute("aria-pressed", state.groupByFlag ? "true" : "false");
+    }
+
     const selectEl = document.getElementById("taskGroupSelect");
     const prevSelected = selectEl.value;
     clearChildren(selectEl);
@@ -2312,7 +2368,6 @@
 
     mainRow.appendChild(checkbox);
     mainRow.appendChild(contentCol);
-    mainRow.appendChild(actionsCol);
     card.appendChild(mainRow);
 
     if (hasDescription) {
@@ -2347,6 +2402,8 @@
       card.appendChild(descBox);
     }
 
+    card.appendChild(actionsCol);
+
     return card;
   }
 
@@ -2366,6 +2423,76 @@
     if (titleInput) {
       titleInput.focus();
     }
+  }
+
+  function getNormalizedPriorityKey(task) {
+    const raw = task && typeof task.priority === "string" ? task.priority.trim().toLowerCase() : "";
+    return VALID_PRIORITIES.includes(raw) ? raw : "none";
+  }
+
+  function createPrioritySectionDOM(prioKey, prioTasks, collapseKey, parentCollapsed) {
+    const safePrio = VALID_PRIORITIES.includes(prioKey) ? prioKey : "none";
+    const effectiveKey = collapseKey || safePrio;
+    const isCollapsed = state.collapsedPriorityGroups.has(effectiveKey);
+
+    const section = document.createElement("div");
+    section.className = "priority-section";
+    section.dataset.priorityGroup = safePrio;
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "priority-header prio-" + safePrio;
+    header.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    header.title = isCollapsed
+      ? "Nhấn để mở rộng nhóm Flag"
+      : "Nhấn để thu gọn nhóm Flag";
+
+    const leftWrap = document.createElement("span");
+    leftWrap.className = "section-header-left";
+
+    const chevron = document.createElement("span");
+    chevron.className = "section-chevron";
+    chevron.textContent = isCollapsed ? "▸" : "▾";
+
+    const flagSvg = createPriorityFlagSvg(safePrio);
+
+    const titleSpan = document.createElement("span");
+    titleSpan.textContent = PRIORITY_META[safePrio].sectionLabel;
+
+    leftWrap.appendChild(chevron);
+    leftWrap.appendChild(flagSvg);
+    leftWrap.appendChild(titleSpan);
+
+    const countSpan = document.createElement("span");
+    countSpan.className = "group-task-count";
+    countSpan.textContent = `${prioTasks.length} công việc`;
+
+    header.appendChild(leftWrap);
+    header.appendChild(countSpan);
+    header.addEventListener("click", () => {
+      if (state.collapsedPriorityGroups.has(effectiveKey)) {
+        state.collapsedPriorityGroups.delete(effectiveKey);
+      } else {
+        state.collapsedPriorityGroups.add(effectiveKey);
+      }
+      renderTaskList();
+    });
+
+    const body = document.createElement("div");
+    body.className = "priority-section-body" + (isCollapsed ? " section-collapsed-body" : "");
+
+    const tasksGrid = document.createElement("div");
+    tasksGrid.className = "task-cards-grid";
+    sortTasksDoneAtBottom(prioTasks).forEach((t) => {
+      tasksGrid.appendChild(
+        createTaskCardDOM(t, { deferImages: Boolean(parentCollapsed || isCollapsed) })
+      );
+    });
+    body.appendChild(tasksGrid);
+
+    section.appendChild(header);
+    section.appendChild(body);
+    return section;
   }
 
   function createCategoryGroupSectionDOM(
@@ -2461,9 +2588,25 @@
     body.className = "group-section-body" + (isCollapsed ? " section-collapsed-body" : "");
 
     if (directGroupTasks.length > 0) {
-      sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
-        body.appendChild(createTaskCardDOM(t, { deferImages: isCollapsed }));
-      });
+      if (state.groupByFlag) {
+        PRIORITY_ORDER.forEach((prioKey) => {
+          const prioTasks = directGroupTasks.filter(
+            (t) => getNormalizedPriorityKey(t) === prioKey
+          );
+          if (prioTasks.length > 0) {
+            body.appendChild(
+              createPrioritySectionDOM(prioKey, prioTasks, `${groupName}::${prioKey}`, isCollapsed)
+            );
+          }
+        });
+      } else {
+        const tasksGrid = document.createElement("div");
+        tasksGrid.className = "task-cards-grid";
+        sortTasksDoneAtBottom(directGroupTasks).forEach((t) => {
+          tasksGrid.appendChild(createTaskCardDOM(t, { deferImages: isCollapsed }));
+        });
+        body.appendChild(tasksGrid);
+      }
     } else if (!hasChildSections) {
       const emptyHint = document.createElement("div");
       emptyHint.className = "folder-empty-hint";
@@ -2478,79 +2621,123 @@
 
   function renderTaskList() {
     const container = document.getElementById("taskListContainer");
-    clearChildren(container);
+    const scrollEl = getMainScrollContainer();
+    const isTasksActive = Boolean(
+      document.getElementById("viewTasks") &&
+        document.getElementById("viewTasks").classList.contains("active")
+    );
+    const savedScrollTop = scrollEl && isTasksActive ? scrollEl.scrollTop : null;
+
+    const fragment = document.createDocumentFragment();
 
     const query = state.searchQuery.trim().toLowerCase();
     const filtered = state.tasks.filter((t) => taskMatchesBaseFilters(t, query));
     const sortedFiltered = sortTasksDoneAtBottom(filtered);
-    const showEmptyFolders = state.statusFilter === "todo" && !query;
+    const showEmptyFolders = state.groupByFolder && state.statusFilter === "todo" && !query;
 
     if (sortedFiltered.length === 0 && !showEmptyFolders) {
       const emptyBox = document.createElement("div");
       emptyBox.className = "empty-state-box";
       if (query) {
         emptyBox.textContent = "Không có công việc nào khớp với từ khóa tìm kiếm.";
-      } else {
+      } else if (state.statusFilter === "done") {
         emptyBox.textContent = "Chưa có công việc nào được đánh dấu Đã xong.";
+      } else {
+        emptyBox.textContent =
+          "Danh sách công việc đang trống. Nhấn '+ Tạo Task' để thêm công việc mới hoặc 'Pull GitHub' để tải dữ liệu về.";
       }
-      container.appendChild(emptyBox);
+      fragment.appendChild(emptyBox);
+      container.replaceChildren(fragment);
+      if (savedScrollTop !== null) {
+        restoreScrollTop(scrollEl, savedScrollTop);
+        state.viewScrollPositions.tasks = scrollEl.scrollTop;
+      }
       return;
     }
 
-    const rawGroupNames = state.groups.slice();
-    sortedFiltered.forEach((task) => {
-      const gName = task.group || "Công việc";
-      rawGroupNames.push(gName);
-    });
-    const orderedGroupNames = ensureGroupHierarchy(rawGroupNames);
-    const groupsToRender = orderedGroupNames.filter((groupName) => {
-      if (showEmptyFolders) return true;
-      return sortedFiltered.some((t) => isSameOrSubgroup(t.group || "Công việc", groupName));
-    });
+    if (state.groupByFolder) {
+      const rawGroupNames = state.groups.slice();
+      sortedFiltered.forEach((task) => {
+        const gName = task.group || "Công việc";
+        rawGroupNames.push(gName);
+      });
+      const orderedGroupNames = ensureGroupHierarchy(rawGroupNames);
+      const groupsToRender = orderedGroupNames.filter((groupName) => {
+        if (showEmptyFolders) return true;
+        return sortedFiltered.some((t) => isSameOrSubgroup(t.group || "Công việc", groupName));
+      });
 
-    if (groupsToRender.length === 0) {
-      const emptyBox = document.createElement("div");
-      emptyBox.className = "empty-state-box";
-      emptyBox.textContent =
-        "Danh sách công việc đang trống. Nhấn '+ Tạo Task' để thêm công việc mới hoặc 'Pull GitHub' để tải dữ liệu về.";
-      container.appendChild(emptyBox);
-      return;
-    }
-
-    const sectionByGroup = new Map();
-    groupsToRender.forEach((groupName) => {
-      const subtreeTasks = sortedFiltered.filter((t) =>
-        isSameOrSubgroup(t.group || "Công việc", groupName)
-      );
-      const directTasks = sortedFiltered.filter(
-        (t) => (t.group || "Công việc") === groupName
-      );
-      const hasChildSections = groupsToRender.some(
-        (other) => getGroupParentPath(other) === groupName
-      );
-      const sectionEl = createCategoryGroupSectionDOM(
-        groupName,
-        directTasks,
-        groupName,
-        subtreeTasks,
-        hasChildSections
-      );
-      sectionByGroup.set(groupName, sectionEl);
-
-      const parentPath = getGroupParentPath(groupName);
-      if (parentPath && sectionByGroup.has(parentPath)) {
-        const parentBody = sectionByGroup
-          .get(parentPath)
-          .querySelector(":scope > .group-section-body");
-        if (parentBody) {
-          parentBody.appendChild(sectionEl);
-          return;
+      if (groupsToRender.length === 0) {
+        const emptyBox = document.createElement("div");
+        emptyBox.className = "empty-state-box";
+        emptyBox.textContent =
+          "Danh sách công việc đang trống. Nhấn '+ Tạo Task' để thêm công việc mới hoặc 'Pull GitHub' để tải dữ liệu về.";
+        fragment.appendChild(emptyBox);
+        container.replaceChildren(fragment);
+        if (savedScrollTop !== null) {
+          restoreScrollTop(scrollEl, savedScrollTop);
+          state.viewScrollPositions.tasks = scrollEl.scrollTop;
         }
+        return;
       }
-      container.appendChild(sectionEl);
-    });
 
+      const sectionByGroup = new Map();
+      groupsToRender.forEach((groupName) => {
+        const subtreeTasks = sortedFiltered.filter((t) =>
+          isSameOrSubgroup(t.group || "Công việc", groupName)
+        );
+        const directTasks = sortedFiltered.filter(
+          (t) => (t.group || "Công việc") === groupName
+        );
+        const hasChildSections = groupsToRender.some(
+          (other) => getGroupParentPath(other) === groupName
+        );
+        const sectionEl = createCategoryGroupSectionDOM(
+          groupName,
+          directTasks,
+          groupName,
+          subtreeTasks,
+          hasChildSections
+        );
+        sectionByGroup.set(groupName, sectionEl);
+
+        const parentPath = getGroupParentPath(groupName);
+        if (parentPath && sectionByGroup.has(parentPath)) {
+          const parentBody = sectionByGroup
+            .get(parentPath)
+            .querySelector(":scope > .group-section-body");
+          if (parentBody) {
+            parentBody.appendChild(sectionEl);
+            return;
+          }
+        }
+        fragment.appendChild(sectionEl);
+      });
+    } else if (state.groupByFlag) {
+      PRIORITY_ORDER.forEach((prioKey) => {
+        const prioTasks = sortedFiltered.filter(
+          (t) => getNormalizedPriorityKey(t) === prioKey
+        );
+        if (prioTasks.length > 0) {
+          fragment.appendChild(createPrioritySectionDOM(prioKey, prioTasks, prioKey, false));
+        }
+      });
+    } else {
+      const tasksGrid = document.createElement("div");
+      tasksGrid.className = "task-cards-grid";
+      sortedFiltered.forEach((t) => {
+        tasksGrid.appendChild(createTaskCardDOM(t));
+      });
+      fragment.appendChild(tasksGrid);
+    }
+
+    container.replaceChildren(fragment);
     refreshDescriptionOverflowButtons();
+
+    if (savedScrollTop !== null) {
+      restoreScrollTop(scrollEl, savedScrollTop);
+      state.viewScrollPositions.tasks = scrollEl.scrollTop;
+    }
   }
 
   function renderGroupCrudList() {
@@ -2580,7 +2767,14 @@
 
     const listEl = document.getElementById("groupCrudList");
     if (!listEl) return;
-    clearChildren(listEl);
+
+    const scrollEl = getMainScrollContainer();
+    const isGroupsActive = Boolean(
+      document.getElementById("viewGroups") &&
+        document.getElementById("viewGroups").classList.contains("active")
+    );
+    const savedScrollTop = scrollEl && isGroupsActive ? scrollEl.scrollTop : null;
+    const fragment = document.createDocumentFragment();
 
     state.groups.forEach((grpName) => {
       const depth = getGroupDepth(grpName);
@@ -2839,8 +3033,14 @@
         item.appendChild(confirmRow);
       }
 
-      listEl.appendChild(item);
+      fragment.appendChild(item);
     });
+
+    listEl.replaceChildren(fragment);
+    if (savedScrollTop !== null) {
+      restoreScrollTop(scrollEl, savedScrollTop);
+      state.viewScrollPositions.groups = scrollEl.scrollTop;
+    }
   }
 
   function renderAll() {
@@ -5636,8 +5836,23 @@
       void flushPendingEditAutoSave();
     });
 
+    const extBodyEl = getMainScrollContainer();
+    if (extBodyEl) {
+      extBodyEl.addEventListener(
+        "scroll",
+        () => {
+          if (state.activeTab) {
+            state.viewScrollPositions[state.activeTab] = extBodyEl.scrollTop;
+          }
+        },
+        { passive: true }
+      );
+    }
+
     document.getElementById("searchTaskInput").addEventListener("input", (ev) => {
       state.searchQuery = ev.target.value;
+      state.viewScrollPositions.tasks = 0;
+      if (extBodyEl) extBodyEl.scrollTop = 0;
       renderFiltersAndCounters();
       renderTaskList();
     });
@@ -5646,14 +5861,49 @@
       btn.addEventListener("click", () => {
         const nextStatus = btn.getAttribute("data-statusfilter");
         state.statusFilter = nextStatus === "done" ? "done" : "todo";
+        state.viewScrollPositions.tasks = 0;
+        if (extBodyEl) extBodyEl.scrollTop = 0;
         renderAll();
       });
     });
 
     document.getElementById("statusFilterSelect").addEventListener("change", (ev) => {
       state.statusFilter = ev.target.value === "done" ? "done" : "todo";
+      state.viewScrollPositions.tasks = 0;
+      if (extBodyEl) extBodyEl.scrollTop = 0;
       renderAll();
     });
+
+    const toggleGroupModePref = async (prefKey) => {
+      const prevVal = state[prefKey];
+      state[prefKey] = !prevVal;
+      state.viewScrollPositions.tasks = 0;
+      if (extBodyEl) extBodyEl.scrollTop = 0;
+      renderFiltersAndCounters();
+      renderTaskList();
+      try {
+        await persistAllToStorage();
+      } catch (err) {
+        state[prefKey] = prevVal;
+        renderFiltersAndCounters();
+        renderTaskList();
+        showBanner(err.message || "Không thể lưu tùy chọn gom nhóm.", "error");
+      }
+    };
+
+    const btnGroupByFolder = document.getElementById("btnGroupByFolder");
+    if (btnGroupByFolder) {
+      btnGroupByFolder.addEventListener("click", () => {
+        void toggleGroupModePref("groupByFolder");
+      });
+    }
+
+    const btnGroupByFlag = document.getElementById("btnGroupByFlag");
+    if (btnGroupByFlag) {
+      btnGroupByFlag.addEventListener("click", () => {
+        void toggleGroupModePref("groupByFlag");
+      });
+    }
 
     const clearDateInput = document.getElementById("clearDoneDateInput");
     if (clearDateInput) {
